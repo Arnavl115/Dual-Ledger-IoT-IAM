@@ -1,0 +1,44 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+}
+
+/* Custom styled scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #000000;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e1e1e;
+  border-radius: 3px;
+  transition: background 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333333;
+}
+
+/* Loading skeleton animation */
+@keyframes pulse-skeleton {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-pulse {
+  background: linear-gradient(90deg, #0a0a0a 25%, #1a1a1a 50%, #0a0a0a 75%);
+  background-size: 200% 100%;
+  animation: pulse-skeleton 1.8s infinite cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+.transition-luxury {
+  transition: all 0.3s cubic-bezier(0.25, 1, 0.5, 1);
+}
