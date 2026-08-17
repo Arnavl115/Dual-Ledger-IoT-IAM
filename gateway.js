@@ -13,7 +13,7 @@ app.use(express.json());
 // Simple Custom CORS Middleware
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     if (req.method === 'OPTIONS') {
         return res.sendStatus(200);
@@ -144,13 +144,59 @@ function persistAccessLog(logEntry) {
     });
 }
 
+// Supabase signing keys (JWKS) for ES256 token verification.
+// Modern Supabase projects sign access tokens with ES256 using a per-project
+// public key served at /auth/v1/.well-known/jwks.json, NOT the HS256 JWT secret.
+let supabaseJwks = [];
+
+async function loadSupabaseJwks() {
+    const baseUrl = (process.env.SUPABASE_URL || '').trim();
+    if (!baseUrl || baseUrl.includes('YOUR_PROJECT_REF')) return;
+    try {
+        const res = await fetch(`${baseUrl}/auth/v1/.well-known/jwks.json`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        supabaseJwks = Array.isArray(data.keys) ? data.keys : [];
+        if (supabaseJwks.length > 0) {
+            console.log(`   🔐 [AUTH] Loaded ${supabaseJwks.length} Supabase signing key(s) via JWKS`);
+        }
+    } catch (err) {
+        console.error(`   ⚠️ [AUTH] JWKS fetch failed: ${err.message}`);
+    }
+}
+
+function verifySupabaseToken(token) {
+    // 1) Prefer JWKS keys (ES256 / RS256) used by modern Supabase projects.
+    for (const jwk of supabaseJwks) {
+        try {
+            const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+            return jwt.verify(token, publicKey, {
+                algorithms: jwk.alg ? [jwk.alg] : ['ES256', 'RS256'],
+            });
+        } catch (err) {
+            // try next key
+        }
+    }
+    // 2) Fallback: legacy HS256 projects sign with the JWT secret.
+    if (process.env.SUPABASE_JWT_SECRET) {
+        try {
+            return jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
+                algorithms: ['HS256'],
+            });
+        } catch (err) {
+            throw err;
+        }
+    }
+    throw new Error('no verification key available');
+}
+
 // JWT verification middleware for protected API routes.
 function requireAuth(req, res, next) {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
     // Dev mode: if Supabase auth is not configured, allow unauthenticated access.
-    if (!process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_JWT_SECRET.includes('YOUR_SUPABASE_JWT_SECRET')) {
+    if (!process.env.SUPABASE_JWT_SECRET && supabaseJwks.length === 0) {
         return next();
     }
 
@@ -159,9 +205,7 @@ function requireAuth(req, res, next) {
     }
 
     try {
-        const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
-            algorithms: ['HS256'],
-        });
+        const payload = verifySupabaseToken(token);
         req.user = payload;
         next();
     } catch (err) {
@@ -236,13 +280,11 @@ app.post('/api/route', requireAuth, (req, res) => {
 
 app.post('/api/devices/toggle', requireAuth, async (req, res) => {
     const { deviceId } = req.body;
-    if (ledgerMode === 'FABRIC') {
-        const updated = await deviceStore.toggle(deviceId);
-        if (updated) {
-            const deviceList = await deviceStore.getAll();
-            return res.status(200).json({ devices: deviceList });
-        }
-    }
+    if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
+
+    await deviceStore.toggle(deviceId);
+
+    // Keep the in-memory array in sync too (also covers MOCK+MEMORY fallback).
     devices = devices.map(d => {
         if (d.id === deviceId) {
             const newStatus = d.status === 'ACTIVE' ? 'REVOKED' : 'ACTIVE';
@@ -250,7 +292,9 @@ app.post('/api/devices/toggle', requireAuth, async (req, res) => {
         }
         return d;
     });
-    res.status(200).json({ devices });
+
+    const deviceList = await deviceStore.getAll();
+    res.status(200).json({ devices: deviceList });
 });
 
 app.post('/api/devices/register', requireAuth, async (req, res) => {
@@ -259,6 +303,20 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
         const formattedId = id.trim().replace(/\s+/g, '_');
         const formattedKey = key.startsWith('0x') ? key : `0x${key}`;
         await deviceStore.register(formattedId, formattedKey);
+
+        // Log the registration event so it shows up in the traffic feed.
+        const logEntry = {
+            id: `REQ-REG-${Date.now()}`,
+            deviceId: formattedId,
+            endpoint: '/api/v1/register',
+            status: 'REGISTERED',
+            route: activeRoute,
+            hash: `${formattedKey.substring(0, 6)}...${formattedKey.substring(formattedKey.length - 3)}`
+        };
+        logs.unshift(logEntry);
+        if (logs.length > 40) logs.pop();
+        persistAccessLog(logEntry);
+
         const deviceList = await deviceStore.getAll();
         return res.status(200).json({ devices: deviceList });
     }
@@ -364,6 +422,9 @@ app.listen(PORT, () => {
     console.log(`🗄️  Persistence: ${dbMode}${dbMode === 'POSTGRES' ? ' (Supabase)' : ' (in-memory fallback)'}`);
     console.log("=========================================\n");
 });
+
+// Load Supabase signing keys (JWKS) for access-token verification.
+loadSupabaseJwks();
 
 // Seed initial devices into Supabase on startup (mock mode only, when Postgres is configured).
 if (dbMode === 'POSTGRES' && ledgerMode === 'MOCK') {

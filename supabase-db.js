@@ -59,7 +59,7 @@ async function seedDevices(seedRows) {
     for (const row of seedRows) {
         const existing = await getDevice(row.id);
         if (!existing) {
-            await insertDevice(row.id, row.public_key, row.status);
+            await insertDevice(row.id, row.public_key || row.key, row.status);
         }
     }
 }
