@@ -10,9 +10,12 @@ import {
     PlusCircle,
     Menu,
     X,
-    ArrowRight
+    ArrowRight,
+    LogOut
 } from 'lucide-react';
 import { Chart, registerables } from 'chart.js';
+import { apiGet, apiPost } from './lib/api';
+import { supabase } from './lib/supabase';
 
 Chart.register(...registerables);
 
@@ -46,7 +49,7 @@ export default function AdminDashboard() {
     useEffect(() => {
         const fetchState = async () => {
             try {
-                const res = await fetch('http://localhost:3000/api/state');
+                const res = await apiGet('/api/state');
                 if (res.ok) {
                     const data = await res.json();
                     setDevices(data.devices || []);
@@ -78,11 +81,7 @@ export default function AdminDashboard() {
     // Backend route switch handler
     const switchRoute = async (route) => {
         try {
-            const res = await fetch('http://localhost:3000/api/route', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ route })
-            });
+            const res = await apiPost('/api/route', { route });
             if (res.ok) {
                 const data = await res.json();
                 setActiveRoute(data.activeRoute);
@@ -95,11 +94,7 @@ export default function AdminDashboard() {
     // Backend device status toggle
     const toggleDeviceStatus = async (deviceId) => {
         try {
-            const res = await fetch('http://localhost:3000/api/devices/toggle', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ deviceId })
-            });
+            const res = await apiPost('/api/devices/toggle', { deviceId });
             if (res.ok) {
                 const data = await res.json();
                 setDevices(data.devices);
@@ -114,11 +109,7 @@ export default function AdminDashboard() {
         e.preventDefault();
         if (!newDeviceId || !newDeviceKey) return;
         try {
-            const res = await fetch('http://localhost:3000/api/devices/register', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: newDeviceId, key: newDeviceKey })
-            });
+            const res = await apiPost('/api/devices/register', { id: newDeviceId, key: newDeviceKey });
             if (res.ok) {
                 const data = await res.json();
                 setDevices(data.devices);
@@ -134,17 +125,18 @@ export default function AdminDashboard() {
     // Backend stress test trigger
     const runStressTest = async () => {
         try {
-            const res = await fetch('http://localhost:3000/api/stress', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ isStressTesting: true })
-            });
+            const res = await apiPost('/api/stress', { isStressTesting: true });
             if (res.ok) {
                 setIsStressTesting(true);
             }
         } catch (err) {
             console.error("Error starting stress test:", err);
         }
+    };
+
+    // Logout handler
+    const handleLogout = async () => {
+        await supabase.auth.signOut();
     };
 
     // Chart.js initialization
@@ -337,6 +329,13 @@ export default function AdminDashboard() {
                         <div className="text-[8px] font-mono text-rose-500/70">FALLBACK: {ledgerError.slice(0, 40)}</div>
                     )}
                     <div className="text-[8px] font-mono text-neutral-600 mt-1">v4.1.2-alpha</div>
+                    <button
+                        onClick={handleLogout}
+                        className="mt-4 w-full py-2 px-3 text-[9px] font-bold tracking-[0.2em] uppercase flex items-center justify-between border border-[#1e1e1e] text-neutral-400 hover:text-white hover:border-neutral-500 transition-luxury"
+                    >
+                        <span>LOG OUT</span>
+                        <LogOut className="w-3 h-3" />
+                    </button>
                 </div>
             </aside>
 
@@ -418,6 +417,13 @@ export default function AdminDashboard() {
                             {ledgerError && (
                                 <div className="text-[8px] font-mono text-rose-500/70 mt-1">FALLBACK: {ledgerError.slice(0, 40)}</div>
                             )}
+                            <button
+                                onClick={() => { handleLogout(); setIsMobileMenuOpen(false); }}
+                                className="mt-4 w-full py-2 px-3 text-[9px] font-bold tracking-[0.2em] uppercase flex items-center justify-between border border-[#1e1e1e] text-neutral-400 hover:text-white hover:border-neutral-500 transition-luxury"
+                            >
+                                <span>LOG OUT</span>
+                                <LogOut className="w-3 h-3" />
+                            </button>
                         </div>
                     </div>
                 </div>

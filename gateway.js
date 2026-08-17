@@ -1,6 +1,9 @@
+require('dotenv').config();
 const express = require('express');
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const fabric = require('./fabric-client');
+const db = require('./supabase-db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,9 +35,12 @@ let devices = [
 
 let ledgerMode = fabric.isEnabled() ? 'FABRIC' : 'MOCK';
 let ledgerError = null;
+let dbMode = db.isConfigured ? 'POSTGRES' : 'MEMORY';
 
-// Device Store Abstraction: talks to the Fabric ledger when enabled,
-// otherwise falls back to the in-memory mock state.
+// Device Store Abstraction:
+//   - FABRIC mode  -> reads/writes device state via fabric-client (blockchain)
+//   - MOCK mode    -> reads/writes device state via Supabase Postgres when configured,
+//                     otherwise falls back to the in-memory array.
 const deviceStore = {
     async getAll() {
         if (ledgerMode === 'FABRIC') {
@@ -43,10 +49,20 @@ const deviceStore = {
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] getAllDevices failed: ${err.message}`);
-                return devices;
+                return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
             }
         }
-        return devices;
+        return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
+    },
+
+    async _getAllPostgres() {
+        try {
+            return await db.getAllDevices();
+        } catch (err) {
+            ledgerError = err.message;
+            console.error(`   ⚠️ [POSTGRES] getAllDevices failed: ${err.message}`);
+            return devices;
+        }
     },
 
     async get(id) {
@@ -56,7 +72,14 @@ const deviceStore = {
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] getDevice failed: ${err.message}`);
-                return devices.find(d => d.id === id) || null;
+            }
+        }
+        if (dbMode === 'POSTGRES') {
+            try {
+                return await db.getDevice(id);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [POSTGRES] getDevice failed: ${err.message}`);
             }
         }
         return devices.find(d => d.id === id) || null;
@@ -69,6 +92,17 @@ const deviceStore = {
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] registerDevice failed: ${err.message}`);
+            }
+        }
+        if (dbMode === 'POSTGRES') {
+            try {
+                const existing = await db.getDevice(id);
+                if (!existing) {
+                    await db.insertDevice(id, key, 'ACTIVE');
+                }
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [POSTGRES] registerDevice failed: ${err.message}`);
             }
         }
         if (!devices.some(d => d.id === id)) {
@@ -86,9 +120,54 @@ const deviceStore = {
                 console.error(`   ⚠️ [FABRIC] toggleDeviceStatus failed: ${err.message}`);
             }
         }
+        if (dbMode === 'POSTGRES') {
+            try {
+                const current = await db.getDevice(id);
+                if (current) {
+                    const newStatus = current.status === 'ACTIVE' ? 'REVOKED' : 'ACTIVE';
+                    await db.updateDeviceStatus(id, newStatus);
+                }
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [POSTGRES] toggleDeviceStatus failed: ${err.message}`);
+            }
+        }
         return null;
     }
 };
+
+// Persist an access log entry to Supabase (non-blocking; failures are logged, never crash the request).
+function persistAccessLog(logEntry) {
+    if (dbMode !== 'POSTGRES') return;
+    db.insertAccessLog(logEntry).catch(err => {
+        console.error(`   ⚠️ [POSTGRES] insertAccessLog failed: ${err.message}`);
+    });
+}
+
+// JWT verification middleware for protected API routes.
+function requireAuth(req, res, next) {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    // Dev mode: if Supabase auth is not configured, allow unauthenticated access.
+    if (!process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_JWT_SECRET.includes('YOUR_SUPABASE_JWT_SECRET')) {
+        return next();
+    }
+
+    if (!token) {
+        return res.status(401).json({ error: 'Unauthorized: Missing bearer token' });
+    }
+
+    try {
+        const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
+            algorithms: ['HS256'],
+        });
+        req.user = payload;
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+    }
+}
 
 let logs = [
     { id: 'REQ-101', deviceId: 'SmartLock_FrontDoor', endpoint: '/api/v1/unlock', status: 'GRANTED', route: 'FABRIC', hash: '8e329c...5e2' },
@@ -126,25 +205,27 @@ function validateSignature(payload) {
 }
 
 // REST API Endpoints for Frontend Integration
-app.get('/api/state', async (req, res) => {
+// All routes are protected by the Supabase JWT middleware.
+app.get('/api/state', requireAuth, async (req, res) => {
     const deviceList = await deviceStore.getAll();
     res.status(200).json({
         activeRoute,
         isStressTesting,
         ledgerMode,
         ledgerError,
+        dbMode,
         devices: deviceList,
         logs,
         tpsData: tpsHistory
     });
 });
 
-app.get('/api/devices', async (req, res) => {
+app.get('/api/devices', requireAuth, async (req, res) => {
     const deviceList = await deviceStore.getAll();
     res.status(200).json(deviceList);
 });
 
-app.post('/api/route', (req, res) => {
+app.post('/api/route', requireAuth, (req, res) => {
     const { route } = req.body;
     if (route === 'FABRIC' || route === 'IOTA') {
         activeRoute = route;
@@ -153,7 +234,7 @@ app.post('/api/route', (req, res) => {
     res.status(400).json({ error: 'Invalid ledger route' });
 });
 
-app.post('/api/devices/toggle', async (req, res) => {
+app.post('/api/devices/toggle', requireAuth, async (req, res) => {
     const { deviceId } = req.body;
     if (ledgerMode === 'FABRIC') {
         const updated = await deviceStore.toggle(deviceId);
@@ -172,7 +253,7 @@ app.post('/api/devices/toggle', async (req, res) => {
     res.status(200).json({ devices });
 });
 
-app.post('/api/devices/register', async (req, res) => {
+app.post('/api/devices/register', requireAuth, async (req, res) => {
     const { id, key } = req.body;
     if (id && key) {
         const formattedId = id.trim().replace(/\s+/g, '_');
@@ -184,7 +265,7 @@ app.post('/api/devices/register', async (req, res) => {
     res.status(400).json({ error: 'Missing device parameters' });
 });
 
-app.post('/api/stress', (req, res) => {
+app.post('/api/stress', requireAuth, (req, res) => {
     const { isStressTesting: stress } = req.body;
     isStressTesting = stress;
     if (isStressTesting) {
@@ -220,6 +301,7 @@ app.post('/api/access', async (req, res) => {
         };
         logs.unshift(logEntry);
         if (logs.length > 40) logs.pop();
+        persistAccessLog(logEntry);
 
         return res.status(401).json({
             status: "error",
@@ -243,6 +325,7 @@ app.post('/api/access', async (req, res) => {
         };
         logs.unshift(logEntry);
         if (logs.length > 40) logs.pop();
+        persistAccessLog(logEntry);
 
         return res.status(403).json({
             status: "error",
@@ -263,6 +346,7 @@ app.post('/api/access', async (req, res) => {
     };
     logs.unshift(logEntry);
     if (logs.length > 40) logs.pop();
+    persistAccessLog(logEntry);
 
     res.status(200).json({
         status: "success",
@@ -277,5 +361,15 @@ app.listen(PORT, () => {
     console.log(`🚦 IoT API Gateway (Dynamic integration) live!`);
     console.log(`📡 Listening for edge devices on port ${PORT}`);
     console.log(`🔗 Ledger backend: ${ledgerMode}${ledgerError ? ` (error: ${ledgerError})` : ''}`);
+    console.log(`🗄️  Persistence: ${dbMode}${dbMode === 'POSTGRES' ? ' (Supabase)' : ' (in-memory fallback)'}`);
     console.log("=========================================\n");
 });
+
+// Seed initial devices into Supabase on startup (mock mode only, when Postgres is configured).
+if (dbMode === 'POSTGRES' && ledgerMode === 'MOCK') {
+    db.seedDevices(devices).then(() => {
+        console.log("   🌱 [POSTGRES] Initial devices seeded (no-op if already present).");
+    }).catch(err => {
+        console.error(`   ⚠️ [POSTGRES] Seeding failed: ${err.message}`);
+    });
+}
