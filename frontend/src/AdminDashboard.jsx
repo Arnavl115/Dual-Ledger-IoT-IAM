@@ -35,6 +35,8 @@ export default function AdminDashboard() {
     const [devices, setDevices] = useState([]);
     const [liveLogs, setLiveLogs] = useState([]);
     const [tpsData, setTpsData] = useState([]);
+    const [ledgerMode, setLedgerMode] = useState('MOCK');
+    const [ledgerError, setLedgerError] = useState(null);
 
     const chartRef = useRef(null);
     const chartInstance = useRef(null);
@@ -52,6 +54,8 @@ export default function AdminDashboard() {
                     setTpsData(data.tpsData || []);
                     setActiveRoute(data.activeRoute || 'FABRIC');
                     setIsStressTesting(data.isStressTesting || false);
+                    setLedgerMode(data.ledgerMode || 'MOCK');
+                    setLedgerError(data.ledgerError || null);
                 }
             } catch (err) {
                 console.warn("Gateway backend offline. Retrying connection...", err.message);
@@ -320,10 +324,19 @@ export default function AdminDashboard() {
 
                 <div className="border-t border-[#1e1e1e] pt-4">
                     <div className="flex items-center gap-2 mb-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-                        <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-400 uppercase ml-1">ONLINE</span>
+                        <span className={`w-1.5 h-1.5 rounded-full ${ledgerMode === 'FABRIC' ? 'bg-emerald-500' : ledgerError ? 'bg-rose-500' : 'bg-amber-500'} animate-ping`}></span>
+                        <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-400 uppercase ml-1">{ledgerMode === 'FABRIC' ? 'LIVE LEDGER' : ledgerError ? 'LEDGER ERROR' : 'MOCK MODE'}</span>
                     </div>
-                    <div className="text-[8px] font-mono text-neutral-600">v4.1.2-alpha</div>
+                    {ledgerMode === 'FABRIC' && (
+                        <div className="text-[8px] font-mono text-emerald-500/70">FABRIC CHAINCODE: CONNECTED</div>
+                    )}
+                    {ledgerMode !== 'FABRIC' && !ledgerError && (
+                        <div className="text-[8px] font-mono text-amber-500/70">IN-MEMORY STATE ACTIVE</div>
+                    )}
+                    {ledgerError && (
+                        <div className="text-[8px] font-mono text-rose-500/70">FALLBACK: {ledgerError.slice(0, 40)}</div>
+                    )}
+                    <div className="text-[8px] font-mono text-neutral-600 mt-1">v4.1.2-alpha</div>
                 </div>
             </aside>
 
@@ -399,9 +412,12 @@ export default function AdminDashboard() {
                         </div>
                         <div className="border-t border-[#1e1e1e] pt-4 mt-6">
                             <div className="flex items-center gap-2">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">ONLINE</span>
+                                <span className={`w-1.5 h-1.5 rounded-full ${ledgerMode === 'FABRIC' ? 'bg-emerald-500' : ledgerError ? 'bg-rose-500' : 'bg-amber-500'}`}></span>
+                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">{ledgerMode === 'FABRIC' ? 'LIVE LEDGER' : ledgerError ? 'LEDGER ERROR' : 'MOCK MODE'}</span>
                             </div>
+                            {ledgerError && (
+                                <div className="text-[8px] font-mono text-rose-500/70 mt-1">FALLBACK: {ledgerError.slice(0, 40)}</div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -430,9 +446,36 @@ export default function AdminDashboard() {
                             </div>
                         </div>
 
+                        {/* Ledger Backend Status Banner */}
+                        {ledgerMode !== 'FABRIC' && (
+                            <div className={`mb-8 p-4 border flex items-center justify-between gap-4 ${ledgerError ? 'border-rose-950 bg-rose-950/10' : 'border-amber-950 bg-amber-950/10'}`}>
+                                <div className="flex items-center gap-3">
+                                    <Database className={`w-4 h-4 flex-shrink-0 ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`} />
+                                    <div>
+                                        <div className={`text-[8px] font-bold tracking-[0.2em] uppercase ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
+                                            {ledgerError ? 'LEDGER BACKEND ERROR' : 'SIMULATION MODE ACTIVE'}
+                                        </div>
+                                        <div className="text-xs font-bold text-white tracking-tight uppercase mt-0.5">
+                                            {ledgerError
+                                                ? `FABRIC NETWORK UNREACHABLE — RUNNING ON MOCK STATE`
+                                                : `FABRIC INTEGRATION DISABLED — RUNNING ON IN-MEMORY STATE`}
+                                        </div>
+                                        {ledgerError && (
+                                            <div className="text-[9px] font-mono text-neutral-500 mt-1">REASON: {ledgerError}</div>
+                                        )}
+                                    </div>
+                                </div>
+                                {!ledgerError && (
+                                    <span className="text-[8px] font-bold tracking-[0.2em] text-neutral-500 uppercase whitespace-nowrap">
+                                        SET FABRIC_ENABLED=true ON GATEWAY
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
                         {/* Stat Cards */}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                            {renderStatCard("01 // Active Ledger", <Server className="w-3.5 h-3.5 text-neutral-400" />, activeRoute)}
+                            {renderStatCard("01 // Active Ledger", <Server className="w-3.5 h-3.5 text-neutral-400" />, `${activeRoute} // ${ledgerMode}`)}
                             {renderStatCard("02 // Latency (AVG)", <Activity className="w-3.5 h-3.5 text-neutral-400" />, "12.4 ms")}
                             {renderStatCard(
                                 "03 // Live Devices",
@@ -639,6 +682,9 @@ export default function AdminDashboard() {
                                 <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">07 // REAL-TIME IAM ROUTING LEDGER</span>
                                 <div className="flex items-center gap-4">
                                     <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">LEDGER: {activeRoute}</span>
+                                    <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${ledgerMode === 'FABRIC' ? 'text-emerald-400' : ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
+                                        BACKEND: {ledgerMode === 'FABRIC' ? 'FABRIC' : ledgerError ? 'ERROR' : 'MOCK'}
+                                    </span>
                                 </div>
                             </div>
 

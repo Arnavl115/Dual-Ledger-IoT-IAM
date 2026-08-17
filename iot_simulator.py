@@ -2,6 +2,12 @@ import time
 import random
 import hashlib
 import json
+import sys
+
+# Ensure emoji output renders correctly on Windows (cp1252 console default)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 try:
     import requests

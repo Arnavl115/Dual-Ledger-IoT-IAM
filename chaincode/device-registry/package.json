@@ -1,0 +1,25 @@
+{
+    "name": "device-registry",
+    "version": "1.0.0",
+    "description": "IoT Device Identity Registry contract for the Dual-Ledger IAM Gateway",
+    "main": "index.js",
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "lint": "eslint *.js */**.js",
+        "start": "fabric-chaincode-node start"
+    },
+    "engineStrict": true,
+    "author": "IAM Gateway Project",
+    "license": "Apache-2.0",
+    "dependencies": {
+        "fabric-contract-api": "~2.5",
+        "fabric-shim": "~2.5",
+        "json-stringify-deterministic": "^1.0.0",
+        "sort-keys-recursive": "^2.1.0"
+    },
+    "devDependencies": {
+        "eslint": "^8.57.0"
+    }
+}

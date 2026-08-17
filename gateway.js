@@ -1,8 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
+const fabric = require('./fabric-client');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
@@ -28,6 +29,66 @@ let devices = [
     { id: 'ServerRack_A', key: '0x8C...3E4F', status: 'ACTIVE' },
     { id: 'BioLab_Fridge', key: '0x12...77CD', status: 'ACTIVE' }
 ];
+
+let ledgerMode = fabric.isEnabled() ? 'FABRIC' : 'MOCK';
+let ledgerError = null;
+
+// Device Store Abstraction: talks to the Fabric ledger when enabled,
+// otherwise falls back to the in-memory mock state.
+const deviceStore = {
+    async getAll() {
+        if (ledgerMode === 'FABRIC') {
+            try {
+                return await fabric.getAllDevices();
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [FABRIC] getAllDevices failed: ${err.message}`);
+                return devices;
+            }
+        }
+        return devices;
+    },
+
+    async get(id) {
+        if (ledgerMode === 'FABRIC') {
+            try {
+                return await fabric.getDevice(id);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [FABRIC] getDevice failed: ${err.message}`);
+                return devices.find(d => d.id === id) || null;
+            }
+        }
+        return devices.find(d => d.id === id) || null;
+    },
+
+    async register(id, key) {
+        if (ledgerMode === 'FABRIC') {
+            try {
+                return await fabric.registerDevice(id, key);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [FABRIC] registerDevice failed: ${err.message}`);
+            }
+        }
+        if (!devices.some(d => d.id === id)) {
+            devices.push({ id, key, status: 'ACTIVE' });
+        }
+        return null;
+    },
+
+    async toggle(id) {
+        if (ledgerMode === 'FABRIC') {
+            try {
+                return await fabric.toggleDeviceStatus(id);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [FABRIC] toggleDeviceStatus failed: ${err.message}`);
+            }
+        }
+        return null;
+    }
+};
 
 let logs = [
     { id: 'REQ-101', deviceId: 'SmartLock_FrontDoor', endpoint: '/api/v1/unlock', status: 'GRANTED', route: 'FABRIC', hash: '8e329c...5e2' },
@@ -65,18 +126,22 @@ function validateSignature(payload) {
 }
 
 // REST API Endpoints for Frontend Integration
-app.get('/api/state', (req, res) => {
+app.get('/api/state', async (req, res) => {
+    const deviceList = await deviceStore.getAll();
     res.status(200).json({
         activeRoute,
         isStressTesting,
-        devices,
+        ledgerMode,
+        ledgerError,
+        devices: deviceList,
         logs,
         tpsData: tpsHistory
     });
 });
 
-app.get('/api/devices', (req, res) => {
-    res.status(200).json(devices);
+app.get('/api/devices', async (req, res) => {
+    const deviceList = await deviceStore.getAll();
+    res.status(200).json(deviceList);
 });
 
 app.post('/api/route', (req, res) => {
@@ -88,8 +153,15 @@ app.post('/api/route', (req, res) => {
     res.status(400).json({ error: 'Invalid ledger route' });
 });
 
-app.post('/api/devices/toggle', (req, res) => {
+app.post('/api/devices/toggle', async (req, res) => {
     const { deviceId } = req.body;
+    if (ledgerMode === 'FABRIC') {
+        const updated = await deviceStore.toggle(deviceId);
+        if (updated) {
+            const deviceList = await deviceStore.getAll();
+            return res.status(200).json({ devices: deviceList });
+        }
+    }
     devices = devices.map(d => {
         if (d.id === deviceId) {
             const newStatus = d.status === 'ACTIVE' ? 'REVOKED' : 'ACTIVE';
@@ -100,21 +172,14 @@ app.post('/api/devices/toggle', (req, res) => {
     res.status(200).json({ devices });
 });
 
-app.post('/api/devices/register', (req, res) => {
+app.post('/api/devices/register', async (req, res) => {
     const { id, key } = req.body;
     if (id && key) {
         const formattedId = id.trim().replace(/\s+/g, '_');
         const formattedKey = key.startsWith('0x') ? key : `0x${key}`;
-        const newDevice = {
-            id: formattedId,
-            key: formattedKey,
-            status: 'ACTIVE'
-        };
-        // Avoid duplicate ids
-        if (!devices.some(d => d.id === formattedId)) {
-            devices.push(newDevice);
-        }
-        return res.status(200).json({ devices });
+        await deviceStore.register(formattedId, formattedKey);
+        const deviceList = await deviceStore.getAll();
+        return res.status(200).json({ devices: deviceList });
     }
     res.status(400).json({ error: 'Missing device parameters' });
 });
@@ -133,7 +198,7 @@ app.post('/api/stress', (req, res) => {
 });
 
 // Gateway Edge Request Handler
-app.post('/api/access', (req, res) => {
+app.post('/api/access', async (req, res) => {
     const payload = req.body;
     processedCount++;
     requestCount++;
@@ -164,7 +229,7 @@ app.post('/api/access', (req, res) => {
     }
 
     // Verify if registered device status is REVOKED
-    const device = devices.find(d => d.id === payload.device_id);
+    const device = await deviceStore.get(payload.device_id);
     if (device && device.status === 'REVOKED') {
         console.log(`   ❌ [ACCESS REVOKED] Authenticated request rejected due to revoked status.`);
         
@@ -211,5 +276,6 @@ app.listen(PORT, () => {
     console.log("=========================================");
     console.log(`🚦 IoT API Gateway (Dynamic integration) live!`);
     console.log(`📡 Listening for edge devices on port ${PORT}`);
+    console.log(`🔗 Ledger backend: ${ledgerMode}${ledgerError ? ` (error: ${ledgerError})` : ''}`);
     console.log("=========================================\n");
 });
