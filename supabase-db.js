@@ -9,11 +9,11 @@ const isConfigured = Boolean(supabaseUrl && supabaseKey && !supabaseUrl.includes
 
 const supabase = isConfigured
     ? createClient(supabaseUrl, supabaseKey, {
-          auth: {
-              persistSession: false,
-              autoRefreshToken: false,
-          },
-      })
+        auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+        },
+    })
     : null;
 
 // -------------------------------

@@ -306,7 +306,7 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
 
         // Log the registration event so it shows up in the traffic feed.
         const logEntry = {
-            id: `REQ-REG-${Date.now()}`,
+            id: `REQ-REG-${crypto.randomUUID()}`,
             deviceId: formattedId,
             endpoint: '/api/v1/register',
             status: 'REGISTERED',
@@ -348,9 +348,9 @@ app.post('/api/access', async (req, res) => {
     const isValid = validateSignature(payload);
     if (!isValid) {
         console.log(`   ❌ [SECURITY ALERT] Signature mismatch. Payload rejected!`);
-        
+
         const logEntry = {
-            id: `REQ-${processedCount}`,
+            id: `REQ-${crypto.randomUUID()}`,
             deviceId: payload.device_id || 'UNKNOWN',
             endpoint: `/api/v1/${payload.action || 'access'}`,
             status: 'DENIED',
@@ -372,9 +372,9 @@ app.post('/api/access', async (req, res) => {
     const device = await deviceStore.get(payload.device_id);
     if (device && device.status === 'REVOKED') {
         console.log(`   ❌ [ACCESS REVOKED] Authenticated request rejected due to revoked status.`);
-        
+
         const logEntry = {
-            id: `REQ-${processedCount}`,
+            id: `REQ-${crypto.randomUUID()}`,
             deviceId: payload.device_id,
             endpoint: `/api/v1/${payload.action || 'access'}`,
             status: 'REVOKED',
@@ -395,7 +395,7 @@ app.post('/api/access', async (req, res) => {
     console.log(`   ✅ [ACCESS GRANTED] Signature verified. (Route: ${activeRoute})`);
 
     const logEntry = {
-        id: `REQ-${processedCount}`,
+        id: `REQ-${crypto.randomUUID()}`,
         deviceId: payload.device_id,
         endpoint: `/api/v1/${payload.action || 'access'}`,
         status: 'GRANTED',
