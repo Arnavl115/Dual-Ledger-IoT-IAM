@@ -54,6 +54,14 @@ async function updateDeviceStatus(id, status) {
     if (error) throw error;
 }
 
+async function updateDevicePublicKey(id, publicKey) {
+    const { error } = await supabase
+        .from('devices')
+        .update({ public_key: publicKey })
+        .eq('id', id);
+    if (error) throw error;
+}
+
 async function seedDevices(seedRows) {
     // Insert seed devices that don't already exist.
     for (const row of seedRows) {
@@ -90,6 +98,7 @@ function mapDeviceRow(row) {
     return {
         id: row.id,
         key: row.public_key,
+        publicKey: row.public_key,
         status: row.status,
     };
 }
@@ -100,6 +109,7 @@ module.exports = {
     getDevice,
     insertDevice,
     updateDeviceStatus,
+    updateDevicePublicKey,
     seedDevices,
     insertAccessLog,
 };

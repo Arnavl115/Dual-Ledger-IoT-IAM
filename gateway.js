@@ -28,9 +28,9 @@ let processedCount = 0;
 let requestCount = 0;
 
 let devices = [
-    { id: 'SmartLock_FrontDoor', key: '0x4F...9A1B', status: 'ACTIVE' },
-    { id: 'ServerRack_A', key: '0x8C...3E4F', status: 'ACTIVE' },
-    { id: 'BioLab_Fridge', key: '0x12...77CD', status: 'ACTIVE' }
+    { id: 'SmartLock_FrontDoor', key: '0x4F...9A1B', publicKey: null, status: 'ACTIVE' },
+    { id: 'ServerRack_A', key: '0x8C...3E4F', publicKey: null, status: 'ACTIVE' },
+    { id: 'BioLab_Fridge', key: '0x12...77CD', publicKey: null, status: 'ACTIVE' }
 ];
 
 let ledgerMode = fabric.isEnabled() ? 'FABRIC' : 'MOCK';
@@ -85,10 +85,10 @@ const deviceStore = {
         return devices.find(d => d.id === id) || null;
     },
 
-    async register(id, key) {
+    async register(id, key, publicKey) {
         if (ledgerMode === 'FABRIC') {
             try {
-                return await fabric.registerDevice(id, key);
+                return await fabric.registerDevice(id, publicKey || key);
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] registerDevice failed: ${err.message}`);
@@ -98,7 +98,9 @@ const deviceStore = {
             try {
                 const existing = await db.getDevice(id);
                 if (!existing) {
-                    await db.insertDevice(id, key, 'ACTIVE');
+                    await db.insertDevice(id, publicKey || key, 'ACTIVE');
+                } else if (publicKey) {
+                    await db.updateDevicePublicKey(id, publicKey);
                 }
             } catch (err) {
                 ledgerError = err.message;
@@ -106,7 +108,7 @@ const deviceStore = {
             }
         }
         if (!devices.some(d => d.id === id)) {
-            devices.push({ id, key, status: 'ACTIVE' });
+            devices.push({ id, key, publicKey, status: 'ACTIVE' });
         }
         return null;
     },
@@ -204,6 +206,12 @@ function requireAuth(req, res, next) {
         return res.status(401).json({ error: 'Unauthorized: Missing bearer token' });
     }
 
+    // Server-to-server: the Supabase service-role key is accepted directly
+    // (it already grants full backend access and never leaves the server).
+    if (process.env.SUPABASE_SERVICE_ROLE_KEY && token === process.env.SUPABASE_SERVICE_ROLE_KEY) {
+        return next();
+    }
+
     try {
         const payload = verifySupabaseToken(token);
         req.user = payload;
@@ -237,15 +245,21 @@ setInterval(() => {
     }
 }, 2000);
 
-function validateSignature(payload) {
+function validateSignature(payload, publicKey) {
     const { device_id, action, timestamp, signature } = payload;
-    if (!device_id || !action || !timestamp || !signature) return false;
+    if (!device_id || !action || !timestamp || !signature || !publicKey) return false;
     const rawDataString = `${device_id}:${action}:${timestamp}`;
-    const expectedSignature = crypto
-        .createHash('sha256')
-        .update(rawDataString)
-        .digest('hex');
-    return expectedSignature === signature;
+    try {
+        const key = crypto.createPublicKey(publicKey);
+        return crypto.verify(
+            'sha256',
+            Buffer.from(rawDataString),
+            key,
+            Buffer.from(signature, 'base64')
+        );
+    } catch (err) {
+        return false;
+    }
 }
 
 // REST API Endpoints for Frontend Integration
@@ -298,11 +312,22 @@ app.post('/api/devices/toggle', requireAuth, async (req, res) => {
 });
 
 app.post('/api/devices/register', requireAuth, async (req, res) => {
-    const { id, key } = req.body;
-    if (id && key) {
+    const { id, key, publicKey } = req.body;
+    if (id) {
         const formattedId = id.trim().replace(/\s+/g, '_');
-        const formattedKey = key.startsWith('0x') ? key : `0x${key}`;
-        await deviceStore.register(formattedId, formattedKey);
+        let formattedKey = null;
+        if (key) {
+            formattedKey = key.startsWith('0x') ? key : `0x${key}`;
+        }
+        await deviceStore.register(formattedId, formattedKey, publicKey);
+
+        const existing = devices.find(d => d.id === formattedId);
+        if (existing) {
+            if (formattedKey) existing.key = formattedKey;
+            if (publicKey) existing.publicKey = publicKey;
+        } else {
+            devices.push({ id: formattedId, key: formattedKey, publicKey: publicKey || null, status: 'ACTIVE' });
+        }
 
         // Log the registration event so it shows up in the traffic feed.
         const logEntry = {
@@ -311,7 +336,9 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
             endpoint: '/api/v1/register',
             status: 'REGISTERED',
             route: activeRoute,
-            hash: `${formattedKey.substring(0, 6)}...${formattedKey.substring(formattedKey.length - 3)}`
+            hash: publicKey
+                ? `${publicKey.substring(0, 6)}...${publicKey.substring(publicKey.length - 6)}`
+                : (formattedKey ? `${formattedKey.substring(0, 6)}...${formattedKey.substring(formattedKey.length - 3)}` : 'N/A')
         };
         logs.unshift(logEntry);
         if (logs.length > 40) logs.pop();
@@ -345,7 +372,9 @@ app.post('/api/access', async (req, res) => {
     console.log(`\n[REQUEST #${processedCount}] Received from ${payload.device_id}`);
     console.log(`   Action: ${payload.action} | Timestamp: ${payload.timestamp}`);
 
-    const isValid = validateSignature(payload);
+    const device = await deviceStore.get(payload.device_id);
+
+    const isValid = validateSignature(payload, device && device.publicKey);
     if (!isValid) {
         console.log(`   ❌ [SECURITY ALERT] Signature mismatch. Payload rejected!`);
 
@@ -369,7 +398,6 @@ app.post('/api/access', async (req, res) => {
     }
 
     // Verify if registered device status is REVOKED
-    const device = await deviceStore.get(payload.device_id);
     if (device && device.status === 'REVOKED') {
         console.log(`   ❌ [ACCESS REVOKED] Authenticated request rejected due to revoked status.`);
 

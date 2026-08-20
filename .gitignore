@@ -11,6 +11,12 @@ dist/
 *.log
 npm-debug.log*
 
+# Device ECDSA private keys (simulator-generated)
+ecdsa_keys.json
+
+# Python
+__pycache__/
+
 # OS / editor
 .DS_Store
 .vscode/

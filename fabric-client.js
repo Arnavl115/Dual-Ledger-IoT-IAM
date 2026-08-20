@@ -161,6 +161,7 @@ function toGatewayDevice(record) {
     return {
         id: record.ID,
         key: record.PublicKey,
+        publicKey: record.PublicKey,
         status: record.Status,
     };
 }
