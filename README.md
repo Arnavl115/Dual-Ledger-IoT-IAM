@@ -1,282 +1,234 @@
-# Dual-Ledger IoT IAM Gateway
+# Dual-Ledger IoT IAM Gateway — Production
 
-A production-oriented IoT identity and access management (IAM) gateway that integrates a Hyperledger Fabric blockchain ledger with a PostgreSQL-backed operational datastore. The system authenticates edge devices via HMAC-style cryptographic signatures, enforces per-device access policy, and exposes a real-time administrative console.
-
-## Architecture
+A production-hardened IoT identity and access management gateway. Authenticates edge devices via **real ECDSA P-256 signatures** (`device_id:action:timestamp` → `crypto.verify('sha256')`), enforces **per-device `ACTIVE|REVOKED` policy on-chain**, and exposes a real-time admin console. No hardcoded demo identities — every device must be registered with a **real PEM public key** (supplied by the device or `iot_simulator.py`).
 
 ```
 ┌─────────────────┐   HTTPS    ┌──────────────────────────────────────┐
 │  Edge Devices   │ ─────────▶ │  Express API Gateway (Node.js)       │
-│  (iot_simulator)│  signatures │  port 3000                          │
-└─────────────────┘            │                                      │
-                               │  ┌─────────────┐   ┌───────────────┐ │
+│  (iot_simulator │  ECDSA sig  │  port 3000 — no demo seed            │
+│   or real hw)   │  + replay   │  timestamp 5m window + rate-limit    │
+└─────────────────┘   protection│  ┌─────────────┐   ┌───────────────┐ │
 ┌─────────────────┐   HTTPS    │  │ Fabric      │   │ Supabase      │ │
 │  Admin Console  │ ─────────▶ │  │ client      │   │ client        │ │
 │  (React + Vite) │  JWT       │  │ (ledger)    │   │ (Postgres)    │ │
 └─────────────────┘            │  └─────────────┘   └───────────────┘ │
 └───────────────────────────────────────────────────┘
+                                 │  ┌─────────────┐                  │
+                                 │  │ IOTA        │                  │
+                                 │  │ Notarization│                  │
+                                 │  └─────────────┘                  │
 ```
 
-### Components
+## Components — all real, no mocks in production
 
-| Layer | Technology | Responsibility |
+| Layer | Technology | Production behavior |
 |---|---|---|
-| **API Gateway** | Node.js, Express 5 | Request routing, signature validation, JWT authorization, log persistence |
-| **Fabric client** | `@hyperledger/fabric-gateway` | Device registry operations against the Hyperledger Fabric channel |
-| **Chaincode** | Node.js, `fabric-contract-api` | `device-registry` smart contract storing device identity in world state |
-| **Datastore** | Supabase (PostgreSQL) | Persistent `devices` and `access_logs` tables; Supabase Auth for console users |
-| **Frontend** | React 19, Vite, Tailwind CSS v4 | Real-time admin dashboard with live ledger/log/device telemetry |
+| **API Gateway** | Node.js 20+, Express 5, `crypto` | ECDSA P-256 verification, 5-min timestamp freshness, replay cache, 120 req/min rate-limit, `helmet`-lite headers, CORS restricted to `FRONTEND_URL`, `POSTGRES` persistence, `/health` |
+| **Fabric client** | `@hyperledger/fabric-gateway@1.12`, `@grpc/grpc-js` | Real gRPC TLS to `peer0.org1:7051`, MSP `Org1MSP`, channel `mychannel`, chaincode `deviceregistry` — all 9 transactions actively used |
+| **Chaincode** | Node `fabric-contract-api@2.5` | `device-registry` — `InitLedger` (idempotent, no fake `0x...` seed), `RegisterDevice` (PEM validation, event), `ReadDevice`, `UpdateDevicePublicKey`, `SetDeviceStatus`/`Revoke`/`Activate`/`Toggle`, `DeleteDevice`, `GetAllDevices`, `GetDeviceHistory` (events: `DeviceRegistered`, `DeviceKeyRotated`, `DeviceStatusChanged`, etc.) |
+| **IOTA** | `@iota/iota-sdk@1.15`, `@iota/notarization@0.1.14` | Dynamic Notarization — one updatable on-chain object per device, `state={device_id,public_key,status}`, Ed25519 signer (`iotaprivkey1...` or generated `.iota-key.json`), faucet auto-fund |
+| **Datastore** | Supabase Postgres | `devices(id PK, public_key NOT NULL, status, created_at)` + `access_logs(request_id PK, device_id, endpoint, status, route, hash, created_at)` — RLS enabled, service-role bypass, no fake seed |
+| **Frontend** | React 19, Vite 8, Tailwind 4, `chart.js` | Real `VITE_GATEWAY_URL` + Supabase Auth (ES256 JWKS), live `activeRoute`/`ledgerMode`/`dbMode` polling |
 
-### Operation modes
-
-The gateway runs in one of two ledger modes, selected at startup:
-
-- **`FABRIC`** — device state is read/written via `fabric-client.js` against a live Hyperledger Fabric network. Set `FABRIC_ENABLED=true`.
-- **`IOTA`** — device state is read/written via `iota-client.js` against the IOTA Tangle using the Notarization toolkit (one updatable Dynamic Notarization object per device). Set `IOTA_ENABLED=true`.
-- **`MOCK`** — device state is served from Supabase Postgres when configured (`dbMode: POSTGRES`), otherwise from an in-memory seed (`dbMode: MEMORY`). This is the default for local development.
-
-When a ledger operation fails (network unreachable), the gateway degrades gracefully: `ledgerError` is populated in `/api/state` and device reads fall back to the datastore.
-
-The active data path is selected per-request by `activeRoute` (see `/api/route`): it picks the IOTA backend when set to `IOTA` and IOTA is enabled, the Fabric backend when set to `FABRIC` and Fabric is enabled, and otherwise falls back to the datastore.
+**Operation modes** (selected at startup via env, switched per-request via `activeRoute`):
+- `FABRIC` (`FABRIC_ENABLED=true` + peer `7051` live + `deviceregistry` deployed) — reads/writes via `fabric-client.js`
+- `IOTA` (`IOTA_ENABLED=true` + `IOTA_NOTARIZATION_PKG_ID` set) — reads/writes via `iota-client.js` (Dynamic Notarization)
+- `MOCK` (neither enabled) — **production fallback is `POSTGRES`** (`db.isConfigured`); `MEMORY` only if Supabase not configured (never with fake `0x...` in production). When ledger unreachable, `ledgerError` is set and reads fall back to Postgres.
 
 ## Repository layout
-
 ```
 .
-├── gateway.js                    # Express API gateway (entrypoint)
-├── fabric-client.js              # Hyperledger Fabric gateway SDK wrapper
-├── iota-client.js                # IOTA Tangle (Notarization toolkit) adapter
-├── supabase-db.js                # Supabase/Postgres persistence layer
-├── supabase-schema.sql           # DDL for devices + access_logs tables
-├── iot_simulator.py              # Edge device simulator (signed request stream)
-├── start-all.bat                 # Launches gateway + frontend on login
-├── .env.example                  # Backend environment template
-├── .iota-key.json                # Generated IOTA signer keypair (git-ignored)
-├── .iota-registry.json           # Device -> notarization mapping (git-ignored)
-├── chaincode/
-│   └── device-registry/          # Fabric smart contract (fabric-contract-api)
-└── frontend/
-    ├── src/
-    │   ├── App.jsx               # Session-aware route protection
-    │   ├── Login.jsx             # Supabase Auth login screen
-    │   ├── AdminDashboard.jsx    # Real-time admin console
-    │   └── lib/                  # Supabase client + authenticated fetch helpers
-    └── .env.example              # Frontend environment template
+├── gateway.js                    # Production gateway (no hardcoded demo logs/devices)
+├── fabric-client.js              # Fabric Gateway SDK — real TLS/MSP, all txns exposed
+├── iota-client.js                # IOTA Notarization adapter (mirrors fabric-client)
+├── supabase-db.js                # Postgres layer (real, no fake seed)
+├── supabase-schema.sql           # DDL + RLS
+├── iot_simulator.py              # ONLY test component — real ECDSA P-256 device emulator
+├── chaincode/device-registry/    # Production chaincode (events, validation, history)
+├── frontend/                     # Admin console (Vite)
+├── scripts/
+│   ├── deploy-fabric.sh          # Linux/WSL2: up + createChannel + deployCC
+│   ├── deploy-fabric.bat         # Windows: Git Bash + Docker Desktop
+│   └── publish-iota-package.sh   # Publish Notarization Move package
+├── .env.example                  # Backend template (FRONTEND_URL, SEED_DEMO_DEVICES=false)
+└── frontend/.env.example
 ```
 
-## Prerequisites
+## Prerequisites — production
 
-- Node.js >= 20 (tested on v26)
-- npm >= 10
-- Python 3.8+ with `requests` for the device simulator
-- A Supabase project (free tier is sufficient)
-- Optional: Hyperledger Fabric network (test-network) for `FABRIC` mode
+- Node.js >=20, npm >=10, Python 3.8+ (`pip install -r requirements.txt`)
+- Supabase project (free tier OK) + `supabase-schema.sql` executed
+- **Fabric (for `FABRIC` mode):** Docker Engine 20+ & `docker compose` v2, WSL2 Ubuntu 22.04+ on Windows (Docker Desktop → Settings → Resources → WSL Integration → Ubuntu), `curl`, `jq`, `Go` (for chaincode), `fabric-samples/bin` (Linux binaries)
+- **IOTA (for `IOTA` mode):** Rust toolchain, `cargo install iota --version 1.14.0`, testnet IOTA tokens via faucet
 
-## Getting started
-
-### 1. Install dependencies
+## Quick start (MOCK + POSTGRES — no ledger)
 
 ```bash
-# Backend
 npm install
-
-# Frontend
 cd frontend && npm install && cd ..
-
-# Chaincode (only required for Fabric deployment)
 cd chaincode/device-registry && npm install && cd ../..
+
+cp .env.example .env          # set SUPABASE_URL, SERVICE_ROLE_KEY, JWT_SECRET
+cp frontend/.env.example frontend/.env  # same SUPABASE_URL + ANON_KEY
+
+# Provision DB: Supabase Dashboard → SQL Editor → run supabase-schema.sql
+# Create Auth user: Dashboard → Authentication → Users → Add user
+
+node gateway.js               # → 🔗 Ledger backend: MOCK  🗄️ POSTGRES (Supabase)
+cd frontend && npm run dev    # → http://127.0.0.1:5173
+python iot_simulator.py       # registers 4 devices with real PEMs, streams signed POST /api/access
 ```
 
-### 2. Configure environment
+Gateway on startup: loads JWKS (`/auth/v1/.well-known/jwks.json`), **does NOT seed fake `0x...` devices** (production: `SEED_DEMO_DEVICES=false`), listens on `PORT`.
 
-Create environment files from the templates:
+## Production: Hyperledger Fabric
 
-```bash
-cp .env.example .env
-cp frontend/.env.example frontend/.env
-```
+**What you must do manually (Windows):**
 
-**Backend `.env`**
+1. **Enable WSL2 + Docker Desktop integration**
+   - Install WSL2 Ubuntu: `wsl --install`
+   - Docker Desktop → Settings → Resources → WSL Integration → Enable Ubuntu
+   - Verify: `wsl bash -c "docker ps"` shows containers (not `docker: command not found`)
 
-| Variable | Required | Description |
-|---|---|---|
-| `PORT` | no | Gateway listen port (default `3000`) |
-| `SUPABASE_URL` | yes | Supabase project URL (`https://<ref>.supabase.co`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | Service-role key (server-side only; bypasses RLS) |
-| `SUPABASE_JWT_SECRET` | yes | JWT secret used for HS256 fallback verification |
-| `FABRIC_ENABLED` | no | `true` to use the Fabric ledger (default `false`) |
-| `CHANNEL_NAME` | no | Fabric channel name (default `mychannel`) |
-| `CHAINCODE_NAME` | no | Fabric chaincode name (default `deviceregistry`) |
-| `MSP_ID` | no | Organization MSP ID (default `Org1MSP`) |
-| `CRYPTO_PATH` | no | Path to the organization's crypto material |
-| `PEER_ENDPOINT` / `PEER_HOST_ALIAS` | no | Peer gRPC endpoint and host alias |
+2. **Deploy Fabric network + chaincode** (choose one):
 
-**Frontend `.env`**
-
-| Variable | Required | Description |
-|---|---|---|
-| `VITE_SUPABASE_URL` | yes | Supabase project URL (must match backend) |
-| `VITE_SUPABASE_ANON_KEY` | yes | **Anon / publishable** key (client-safe; `sb_publishable_...`) |
-| `VITE_GATEWAY_URL` | no | Backend base URL (default `http://localhost:3000`) |
-
-> **Security note:** `SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_JWT_SECRET` must never be exposed to the frontend. Both `.env` files are covered by `.gitignore`; only the `.env.example` templates are committed.
-
-### 3. Provision the database
-
-Run `supabase-schema.sql` in the Supabase SQL Editor. It creates:
-
-```sql
-devices (id text PK, public_key text NOT NULL, status text DEFAULT 'ACTIVE', created_at timestamptz DEFAULT now())
-access_logs (request_id text PK, device_id text, endpoint text, status text, route text, hash text, created_at timestamptz DEFAULT now())
-```
-
-Row Level Security is enabled on both tables; the service-role key bypasses RLS for backend access. Create at least one user under **Supabase Auth → Users** to sign in to the console.
-
-### 4. Start the gateway
-
-```bash
-node gateway.js
-```
-
-On startup the gateway:
-
-1. Loads the Supabase JWKS public keys (ES256) used to verify access tokens.
-2. Seeds the initial device set into Postgres if the `devices` table is empty.
-3. Listens for HTTP requests on `PORT`.
-
-### 5. Start the frontend
-
-```bash
-cd frontend
-npm run dev
-```
-
-Open `http://127.0.0.1:5173` and sign in with the Supabase Auth user.
-
-### 6. Run the device simulator
-
-```bash
-python iot_simulator.py
-```
-
-The simulator fetches the registered device list and continuously posts cryptographically signed access requests to `/api/access`.
-
-### 7. One-shot startup (optional)
-
-Double-click `start-all.bat` (or copy its shortcut into the Windows Startup folder) to launch the gateway and frontend together on login.
-
-## API reference
-
-### Device-facing
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `POST` | `/api/access` | Device signature | Validates a signed access request; returns `200` (granted), `401` (bad signature), or `403` (device revoked) |
-
-Request schema:
-
-```json
-{
-  "device_id": "SmartLock_FrontDoor",
-  "action": "unlock",
-  "timestamp": "1760000000",
-  "signature": "<sha256(device_id:action:timestamp)>"
-}
-```
-
-### Console-facing
-
-All console endpoints require an `Authorization: Bearer <supabase-access-token>` header. Tokens are verified against the project JWKS (ES256) with an HS256 fallback for legacy projects. When `SUPABASE_JWT_SECRET` is unset, auth is bypassed for local development.
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/state` | Full dashboard state: devices, access logs, TPS history, ledger mode, persistence mode |
-| `GET` | `/api/devices` | Registered device list |
-| `POST` | `/api/route` | Switch active ledger route (`FABRIC` / `IOTA`) |
-| `POST` | `/api/devices/toggle` | Toggle a device between `ACTIVE` and `REVOKED` |
-| `POST` | `/api/devices/register` | Register a new device; emits a `REGISTERED` log entry |
-| `POST` | `/api/stress` | Toggle stress-test pacing on the simulator |
-
-### Response statuses (device access)
-
-| Code | Meaning |
-|---|---|
-| `200` | Signature valid, device active — access granted |
-| `401` | Signature mismatch or missing fields — rejected |
-| `403` | Signature valid but device status is `REVOKED` |
-
-## Hyperledger Fabric integration
-
-The `device-registry` chaincode exposes the following transaction functions:
-
-| Transaction | Description |
-|---|---|
-| `InitLedger` | Seeds the three default devices into world state |
-| `RegisterDevice` | Enroll a device as `ACTIVE` with a public key |
-| `ReadDevice` / `DeviceExists` | Read device identity by ID |
-| `UpdateDevicePublicKey` | Rotate a device public key |
-| `SetDeviceStatus` / `RevokeDevice` / `ActivateDevice` | Manage device lifecycle |
-| `ToggleDeviceStatus` | Flip between `ACTIVE` and `REVOKED` |
-| `GetAllDevices` | Enumerate all devices |
-| `DeleteDevice` | Remove a device record |
-
-The gateway connects through `fabric-client.js`, which reads connection profile and crypto material from the paths configured in `.env`. Deploy the chaincode to a running Fabric test-network before enabling `FABRIC_ENABLED=true`.
-
-## IOTA Tangle integration
-
-The gateway stores device identity on the IOTA Tangle via the [IOTA Notarization toolkit](https://github.com/iotaledger/notarization) (Rebased protocol). Every device is represented by a **Dynamic Notarization** object whose on-chain `state` holds `{ device_id, public_key, status }`; the object's immutable description stores the device ID and its metadata tracks the last update timestamp.
-
-### Publishing the Notarization package
-
-The toolkit's Move package must be published to the IOTA network once; the resulting package ID goes in `.env` as `IOTA_NOTARIZATION_PKG_ID`:
-
-1. Install the IOTA CLI: `cargo install iota --version 1.14.0` (requires Rust toolchain).
-2. Create a testnet environment and an account:
+   **Option A — WSL2 Ubuntu (recommended):**
    ```bash
+   wsl
+   cd /mnt/c/Users/arnav/se_project
+   bash scripts/deploy-fabric.sh
+   # Equivalent manual:
+   cd fabric-samples/test-network
+   ./network.sh up createChannel -c mychannel -ca
+   ./network.sh deployCC -ccn deviceregistry -ccp ../../chaincode/device-registry -ccl javascript -c mychannel
+   ```
+
+   **Option B — Windows Git Bash:**
+   ```powershell
+   scripts\deploy-fabric.bat
+   # If path conversion error "mkdir C:\Program Files\Git\var", use WSL2 steps above
+   ```
+
+   Verify: `docker ps | grep peer0.org1` and `docker logs peer0.org1.example.com` should show chaincode container `dev-peer0.org1...-deviceregistry`.
+
+3. **Configure gateway for Fabric:**
+   ```env
+   FABRIC_ENABLED=true
+   CHANNEL_NAME=mychannel
+   CHAINCODE_NAME=deviceregistry
+   MSP_ID=Org1MSP
+   CRYPTO_PATH=./fabric-samples/test-network/organizations/peerOrganizations/org1.example.com
+   PEER_ENDPOINT=localhost:7051
+   PEER_HOST_ALIAS=peer0.org1.example.com
+   ```
+   Restart: `node gateway.js` → `🔗 Ledger backend: FABRIC` (no `ledgerError`).
+
+4. **Test Fabric path:**
+   ```bash
+   node -e "require('dotenv').config(); require('./fabric-client').getAllDevices().then(c=>console.log('Fabric devices',c.length)).catch(e=>console.error(e.message))"
+   curl -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" http://localhost:3000/api/state | jq .ledgerMode,.ledgerError
+   ```
+
+   Chaincode transactions actively used (all 9 via gateway):
+   ```
+   RegisterDevice, ReadDevice, DeviceExists, UpdateDevicePublicKey, SetDeviceStatus,
+   RevokeDevice, ActivateDevice, ToggleDeviceStatus, GetAllDevices, DeleteDevice, GetDeviceHistory
+   ```
+   New gateway endpoints expose them: `POST /api/devices/revoke`, `/activate`, `/update-key`, `DELETE /api/devices/:id`.
+
+**Chaincode production notes:** `InitLedger` is now idempotent and emits `InitLedger` event — it **does not** seed `0x4F...` fake keys. Devices must be registered with real PEMs via `RegisterDevice` (validates `^[A-Za-z0-9_-]{3,64}$` and `-----BEGIN PUBLIC KEY-----`). All mutations emit events (`DeviceRegistered`, `DeviceStatusChanged`, etc.) and record `RegisteredBy`/`UpdatedBy` (`MSP:cert`).
+
+## Production: IOTA Tangle
+
+**What you must do manually:**
+
+1. **Install IOTA CLI** (requires Rust):
+   ```bash
+   cargo install iota --version 1.14.0 --locked
+   iota --version
+   ```
+
+2. **Publish Notarization Move package** (one-time):
+   ```bash
+   bash scripts/publish-iota-package.sh
+   # Or manually:
    iota client new-env --alias testnet --rpc https://api.testnet.iota.cafe
    iota client switch --env testnet
    iota client new-address ed25519
+   iota client faucet --address <YOUR_ADDRESS>  # or https://faucet.testnet.iota.cafe
+   git clone https://github.com/iotaledger/notarization.git /tmp/notarization
+   cd /tmp/notarization/notarization-move && ./scripts/publish_package.sh
+   # Copy printed 0x... package ID
    ```
-3. Fund the account with test tokens from the [testnet faucet](https://faucet.testnet.iota.cafe), then:
-   ```bash
-   iota client switch --address <YOUR_ADDRESS>
+
+3. **Configure gateway for IOTA:**
+   ```env
+   IOTA_ENABLED=true
+   IOTA_NODE_URL=https://api.testnet.iota.cafe
+   IOTA_FAUCET_URL=https://faucet.testnet.iota.cafe
+   IOTA_NOTARIZATION_PKG_ID=0x<your_package_id>
+   # Optional: pin signer
+   # IOTA_PRIVATE_KEY=iotaprivkey1q...
    ```
-4. Clone the toolkit and publish:
-   ```bash
-   git clone https://github.com/iotaledger/notarization.git
-   cd notarization/notarization-move
-   ./scripts/publish_package.sh
-   ```
-5. Copy the printed package ID (e.g. `0x…`) into `IOTA_NOTARIZATION_PKG_ID`.
+   Restart: `node gateway.js` → `🔗 Ledger backend: IOTA` → `🌱 [IOTA] Connected to ...` → faucet funds address if empty → notarizes devices.
 
-### Runtime behavior
+   Gateway stores signer in `.iota-key.json` and `device→notarization` map in `.iota-registry.json` (both git-ignored, stable across restarts).
 
-- On startup, if `IOTA_ENABLED=true`, the gateway connects to the node (`IOTA_NODE_URL`, default `https://api.testnet.iota.cafe`), funds its signer address from the faucet when empty, and notarizes the seeded devices.
-- The gateway signer is an Ed25519 keypair: set `IOTA_PRIVATE_KEY` to pin it, otherwise a keypair is generated and persisted to `.iota-key.json`.
-- Device → notarization mappings are tracked locally in `.iota-registry.json` (created automatically).
-- `register`, `toggle`, and `revoke` operations update the device's on-chain state; reads fetch the live state from the Tangle.
-- The explorer URL for any notarization is `<IOTA_NODE_URL> + "/object/" + <notarization_id>` on the Rebased explorer.
+   Verify: `node -e "require('dotenv').config(); require('./iota-client').getAllDevices().then(console.log)"` and explorer `https://explorer.rebased.iota.cafe/object/<notarization_id>`.
 
-## Security model
+**Switching ledgers at runtime:** Admin console → `ACTIVE ROUTE` → `FABRIC` / `IOTA TANGLE` (`POST /api/route`). `activeBackend()` routes per-request; if selected backend not enabled or unreachable, falls back to `POSTGRES` with `ledgerError`.
 
-- **Device authentication** uses SHA-256 signatures over `device_id:action:timestamp` — no shared secrets cross the wire.
-- **Console authorization** uses Supabase Auth JWTs verified server-side against the project signing keys.
-- **Secrets management**: service-role and JWT secret live only in the backend `.env`; the frontend ships only the anon/publishable key.
-- **RLS**: both database tables have Row Level Security enabled; backend access uses the service-role key.
-- **CORS**: the gateway whitelists `Content-Type` and `Authorization` headers and responds to preflight `OPTIONS`.
+## Security model — production hardened
 
-## Development
+- **Device auth:** Real ECDSA P-256 `SHA256(device_id:action:timestamp)` verified via `crypto.createPublicKey` + `crypto.verify`. Validates PEM, curve (`prime256v1`/`P-256`), rejects weak keys. `gateway.js:295` `validateSignature` enforces **5-min timestamp window** (`TIMESTAMP_WINDOW_MS`) + **30s future tolerance** + **in-memory replay cache** (`SEEN_SIGNATURES` 5-min TTL). `429` Rate limit `120 req/min` per IP on `/api/access`.
+- **Console auth:** Supabase Auth JWT verified against JWKS `ES256` (`/auth/v1/.well-known/jwks.json`) with `HS256` fallback (`SUPABASE_JWT_SECRET`). Service-role key accepted server-to-server only. `requireAuth` `gateway.js:243`.
+- **Secrets:** `SUPABASE_SERVICE_ROLE_KEY`/`JWT_SECRET` never leave `.env` (git-ignored); frontend only gets `VITE_SUPABASE_ANON_KEY`.
+- **Headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `HSTS` in production, `Referrer-Policy`, `Permissions-Policy`.
+- **CORS:** Restricted to `FRONTEND_URL` (`http://localhost:5173` dev, your domain in prod); `*` only if explicitly set.
+- **Persistence:** Every `GRANTED`/`DENIED`/`REVOKED`/`REGISTERED` log persisted to `access_logs` with `REQ-<UUID>` PK (retry on rare collision) + 40-entry in-memory ring for dashboard.
+- **RLS:** `supabase-schema.sql` enables RLS on `devices`/`access_logs`; backend uses service-role bypass.
+
+## API reference
+
+**Device-facing:** `POST /api/access` — `device_id, action, timestamp, signature` (base64 ECDSA). `200` granted, `400` missing fields, `401` bad sig / stale timestamp / replay / unknown device, `403` revoked, `429` rate-limit. `GET /health` — no auth, `{status, ledgerMode, dbMode, activeRoute, uptime}`.
+
+**Console-facing:** `Authorization: Bearer <supabase-access-token>` required.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/state` | Devices + logs + TPS + `ledgerMode`/`ledgerError`/`dbMode` |
+| `GET` | `/api/devices` | List |
+| `POST` | `/api/route` | `{route:"FABRIC"\|"IOTA"}` |
+| `POST` | `/api/devices/register` | `{id, publicKey}` (PEM validated, `3-64` `^[A-Za-z0-9_-]+$`) |
+| `POST` | `/api/devices/toggle` | `{deviceId}` flips `ACTIVE↔REVOKED` (Fabric/IOTA/Postgres) |
+| `POST` | `/api/devices/revoke` | `{deviceId}` → `REVOKED` |
+| `POST` | `/api/devices/activate` | `{deviceId}` → `ACTIVE` |
+| `POST` | `/api/devices/update-key` | `{deviceId, publicKey}` PEM rotation |
+| `DELETE` | `/api/devices/:id` | Remove (Fabric `DeleteDevice` + Postgres) |
+| `POST` | `/api/stress` | `{isStressTesting:true}` 3-s pacing burst |
+
+## Development & production checks
 
 ```bash
-# Frontend build + lint
-cd frontend
-npm run build
-npm run lint        # oxlint
+npm test                    # backend syntax: gateway, fabric-client, iota-client, supabase-db
+npm run test:frontend       # cd frontend && npm run build
+npm run lint                # oxlint
+node --check gateway.js && node --check chaincode/device-registry/lib/deviceRegistry.js
 
-# Backend syntax check
-node --check gateway.js
+# Production build
+cd frontend && npm run build   # → dist/
+NODE_ENV=production FRONTEND_URL=https://your.domain node gateway.js
 ```
 
-## License
+## Manual checklist — what YOU must do for production
 
+- [ ] **Supabase:** Create project, run `supabase-schema.sql`, create Auth user, fill `.env` + `frontend/.env`
+- [ ] **Fabric (if `FABRIC` mode):** Enable WSL2 Docker integration, run `scripts/deploy-fabric.sh` (or `.bat` → fallback to WSL2), set `FABRIC_ENABLED=true` in `.env`, verify `peer0.org1:7051` and chaincode `deviceregistry` via `docker ps` + `fabric-client.getAllDevices()`
+- [ ] **IOTA (if `IOTA` mode):** `cargo install iota`, `scripts/publish-iota-package.sh`, set `IOTA_NOTARIZATION_PKG_ID` + `IOTA_ENABLED=true` in `.env`
+- [ ] **Gateway:** Set `FRONTEND_URL` to your frontend origin (not `*` in prod), `NODE_ENV=production`, `PORT`, `SEED_DEMO_DEVICES=false` (never `true` in prod), ensure `SUPABASE_*` set, run `node gateway.js` and check `/health` + `/api/state` (`ledgerMode` `FABRIC`/`IOTA`, `dbMode` `POSTGRES`, no `ledgerError`)
+- [ ] **Frontend:** Set `VITE_GATEWAY_URL` to production gateway URL, `VITE_SUPABASE_*`, `npm run build`, serve `dist/` via `vite preview` or Nginx
+- [ ] **Devices:** Provision real devices with P-256 keypairs (`cryptography`/`ecdsa`), register via `POST /api/devices/register` with PEM, test `POST /api/access` with fresh `timestamp` + `signature`; **never use `0x4F...` demo keys in production** (chaincode rejects non-PEM, gateway rejects fake)
+- [ ] **Security:** Put gateway behind HTTPS reverse proxy (Nginx/Caddy), set `Strict-Transport-Security`, restrict Supabase RLS policies if needed, rotate `SUPABASE_JWT_SECRET` regularly
+
+## License
 Apache-2.0 (chaincode) / ISC (project).

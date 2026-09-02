@@ -157,6 +157,30 @@ async function revokeDevice(id) {
     return toGatewayDevice(record);
 }
 
+async function activateDevice(id) {
+    const c = await connectGateway();
+    const resultBytes = await c.submitTransaction('ActivateDevice', id);
+    const record = JSON.parse(utf8Decoder.decode(resultBytes));
+    return toGatewayDevice(record);
+}
+
+async function updateDevicePublicKey(id, publicKey) {
+    const c = await connectGateway();
+    const resultBytes = await c.submitTransaction('UpdateDevicePublicKey', id, publicKey);
+    const record = JSON.parse(utf8Decoder.decode(resultBytes));
+    return toGatewayDevice(record);
+}
+
+async function deleteDevice(id) {
+    const c = await connectGateway();
+    await c.submitTransaction('DeleteDevice', id);
+    return true;
+}
+
+async function getContract() {
+    return connectGateway();
+}
+
 function toGatewayDevice(record) {
     return {
         id: record.ID,
@@ -191,5 +215,9 @@ module.exports = {
     registerDevice,
     toggleDeviceStatus,
     revokeDevice,
+    activateDevice,
+    updateDevicePublicKey,
+    deleteDevice,
+    getContract,
     close,
 };

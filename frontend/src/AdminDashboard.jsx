@@ -108,18 +108,23 @@ export default function AdminDashboard() {
         }
     };
 
-    // Backend device registration
+    // Backend device registration — production: requires real PEM public key (no fake 0x...)
     const handleAddDevice = async (e) => {
         e.preventDefault();
         if (!newDeviceId || !newDeviceKey) return;
         try {
-            const res = await apiPost('/api/devices/register', { id: newDeviceId, key: newDeviceKey });
+            const isPem = newDeviceKey.includes('-----BEGIN PUBLIC KEY-----');
+            const payload = isPem ? { id: newDeviceId, publicKey: newDeviceKey } : { id: newDeviceId, key: newDeviceKey };
+            const res = await apiPost('/api/devices/register', payload);
             if (res.ok) {
                 const data = await res.json();
                 setDevices(data.devices);
                 setNewDeviceId('');
                 setNewDeviceKey('');
                 setIsAddDeviceModalOpen(false);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                alert(err.error || 'Registration failed — provide a valid PEM public key');
             }
         } catch (err) {
             console.error("Error registering device:", err);
@@ -483,10 +488,10 @@ export default function AdminDashboard() {
                             </div>
                         )}
 
-                        {/* Stat Cards */}
+                        {/* Stat Cards — production: live values only, no hardcoded demo */}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                             {renderStatCard("01 // Active Ledger", <Server className="w-3.5 h-3.5 text-neutral-400" />, `${activeRoute} // ${ledgerMode}`)}
-                            {renderStatCard("02 // Latency (AVG)", <Activity className="w-3.5 h-3.5 text-neutral-400" />, "12.4 ms")}
+                            {renderStatCard("02 // Live TPS (PEAK)", <Activity className="w-3.5 h-3.5 text-neutral-400" />, tpsData.length ? `${Math.max(...tpsData.map(d => d.tps))} TPS` : "0 TPS")}
                             {renderStatCard(
                                 "03 // Live Devices",
                                 <Cpu className="w-3.5 h-3.5 text-neutral-400" />,
@@ -779,15 +784,16 @@ export default function AdminDashboard() {
                                 />
                             </div>
                             <div>
-                                <label className="block text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-1.5">Identity Key (HEX)</label>
-                                <input
-                                    type="text"
+                                <label className="block text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-1.5">Public Key (PEM)</label>
+                                <textarea
                                     value={newDeviceKey}
                                     onChange={(e) => setNewDeviceKey(e.target.value)}
-                                    placeholder="0xAF32...B89C"
-                                    className="w-full bg-black border border-[#1e1e1e] text-white p-3 text-xs tracking-wider focus:outline-none focus:border-white transition-luxury"
+                                    placeholder="-----BEGIN PUBLIC KEY-----&#10;MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...&#10;-----END PUBLIC KEY-----"
+                                    rows={3}
+                                    className="w-full bg-black border border-[#1e1e1e] text-white p-3 text-[10px] font-mono tracking-wider focus:outline-none focus:border-white transition-luxury"
                                     required
                                 />
+                                <div className="text-[8px] font-mono text-neutral-600 mt-1">Paste full PEM from device provisioning (P-256). Simulator auto-registers via /api/devices/register.</div>
                             </div>
                             <div className="pt-4 flex gap-3">
                                 <button

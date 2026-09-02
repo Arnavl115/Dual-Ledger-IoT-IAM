@@ -62,12 +62,24 @@ async function updateDevicePublicKey(id, publicKey) {
     if (error) throw error;
 }
 
+async function deleteDevice(id) {
+    const { error } = await supabase
+        .from('devices')
+        .delete()
+        .eq('id', id);
+    if (error) throw error;
+}
+
 async function seedDevices(seedRows) {
-    // Insert seed devices that don't already exist.
+    // Production: only seed if explicitly requested and rows are real PEMs (no fake 0x...).
+    if (!seedRows || seedRows.length === 0) return;
     for (const row of seedRows) {
+        if (!row.id || (!row.public_key && !row.key)) continue;
+        const pem = row.public_key || row.key;
+        if (typeof pem === 'string' && pem.startsWith('0x') && pem.includes('...')) continue; // skip fake demo keys
         const existing = await getDevice(row.id);
         if (!existing) {
-            await insertDevice(row.id, row.public_key || row.key, row.status);
+            await insertDevice(row.id, pem, row.status);
         }
     }
 }
@@ -110,6 +122,7 @@ module.exports = {
     insertDevice,
     updateDeviceStatus,
     updateDevicePublicKey,
+    deleteDevice,
     seedDevices,
     insertAccessLog,
 };
