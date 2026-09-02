@@ -70,20 +70,34 @@ function saveRegistry() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function ensureFunded(address) {
-    const balance = await iotaClient.getBalance({ owner: address });
-    if (Number(balance.totalBalance) > 0) {
+    try {
+        const balance = await iotaClient.getBalance({ owner: address });
+        if (Number(balance.totalBalance) > 0) {
+            return;
+        }
+    } catch (err) {
+        console.warn(`   ⚠️ [IOTA] getBalance failed for ${address}: ${err.message} — skipping faucet`);
         return;
     }
     console.log(`   🌐 [IOTA] Requesting test tokens from faucet for ${address} ...`);
-    await requestIotaFromFaucetV0({ host: faucetUrl, recipient: address });
+    try {
+        await requestIotaFromFaucetV0({ host: faucetUrl, recipient: address });
+    } catch (err) {
+        console.warn(`   ⚠️ [IOTA] Faucet request failed (use https://faucet.testnet.iota.cafe manually): ${err.message}`);
+        console.warn(`   ⚠️ [IOTA] Fund ${address} via web faucet and restart gateway`);
+        return;
+    }
     for (let i = 0; i < 10; i++) {
         await sleep(2000);
-        const check = await iotaClient.getBalance({ owner: address });
-        if (Number(check.totalBalance) > 0) {
-            return;
-        }
+        try {
+            const check = await iotaClient.getBalance({ owner: address });
+            if (Number(check.totalBalance) > 0) {
+                console.log(`   ✅ [IOTA] Funded ${address}`);
+                return;
+            }
+        } catch {}
     }
-    console.warn(`   ⚠️ [IOTA] Faucet did not fund ${address} yet; retrying on next write.`);
+    console.warn(`   ⚠️ [IOTA] Faucet did not fund ${address} yet; fund manually at ${faucetUrl} and retry on next write.`);
 }
 
 async function connect() {
