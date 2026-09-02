@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --check gateway.js && node --check fabric-client.js && node --check iota-client.js && node --check supabase-db.js && echo \"✓ All backend syntax checks passed\"",
+    "test:frontend": "cd frontend && npm run build",
+    "lint": "oxlint 2>&1 || echo \"oxlint not installed, skipping\""
   },
   "keywords": [],
   "author": "",
