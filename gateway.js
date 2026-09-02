@@ -113,21 +113,25 @@ const deviceStore = {
         const backend = activeBackend();
         if (backend === 'IOTA') {
             try {
-                return await iota.getAllDevices();
+                const list = await iota.getAllDevices();
+                if (list && list.length > 0) return list;
+                console.warn('   ⚠️ [IOTA] getAllDevices empty on Tangle, falling back to Postgres');
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [IOTA] getAllDevices failed: ${err.message}`);
-                return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
             }
+            return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
         }
         if (backend === 'FABRIC') {
             try {
-                return await fabric.getAllDevices();
+                const list = await fabric.getAllDevices();
+                if (list && list.length > 0) return list;
+                console.warn('   ⚠️ [FABRIC] getAllDevices empty on ledger, falling back to Postgres');
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] getAllDevices failed: ${err.message}`);
-                return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
             }
+            return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
         }
         return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
     },
@@ -146,7 +150,10 @@ const deviceStore = {
         const backend = activeBackend();
         if (backend === 'IOTA') {
             try {
-                return await iota.getDevice(id);
+                const dev = await iota.getDevice(id);
+                if (dev) return dev;
+                // Not found on Tangle — fall through to Postgres for already-registered devices
+                console.warn(`   ⚠️ [IOTA] getDevice(${id}) not found on Tangle, falling back to Postgres`);
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [IOTA] getDevice failed: ${err.message}`);
@@ -154,7 +161,9 @@ const deviceStore = {
         }
         if (backend === 'FABRIC') {
             try {
-                return await fabric.getDevice(id);
+                const dev = await fabric.getDevice(id);
+                if (dev) return dev;
+                console.warn(`   ⚠️ [FABRIC] getDevice(${id}) not found on ledger, falling back to Postgres`);
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] getDevice failed: ${err.message}`);
