@@ -14,6 +14,10 @@ npm-debug.log*
 # Device ECDSA private keys (simulator-generated)
 ecdsa_keys.json
 
+# IOTA signer keypair + device->notarization mapping (generated at runtime)
+.iota-key.json
+.iota-registry.json
+
 # Python
 __pycache__/
 
@@ -21,3 +25,11 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+.mcp.json
+.cursor/mcp.json
+.gemini/settings.json
+.kiro/settings/mcp.json
+opencode.jsonc
+opencode.json
+.tempest
+.tempest-pid

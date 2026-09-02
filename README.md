@@ -32,9 +32,12 @@ A production-oriented IoT identity and access management (IAM) gateway that inte
 The gateway runs in one of two ledger modes, selected at startup:
 
 - **`FABRIC`** — device state is read/written via `fabric-client.js` against a live Hyperledger Fabric network. Set `FABRIC_ENABLED=true`.
+- **`IOTA`** — device state is read/written via `iota-client.js` against the IOTA Tangle using the Notarization toolkit (one updatable Dynamic Notarization object per device). Set `IOTA_ENABLED=true`.
 - **`MOCK`** — device state is served from Supabase Postgres when configured (`dbMode: POSTGRES`), otherwise from an in-memory seed (`dbMode: MEMORY`). This is the default for local development.
 
-When a Fabric operation fails (network unreachable), the gateway degrades gracefully: `ledgerError` is populated in `/api/state` and device reads fall back to the datastore.
+When a ledger operation fails (network unreachable), the gateway degrades gracefully: `ledgerError` is populated in `/api/state` and device reads fall back to the datastore.
+
+The active data path is selected per-request by `activeRoute` (see `/api/route`): it picks the IOTA backend when set to `IOTA` and IOTA is enabled, the Fabric backend when set to `FABRIC` and Fabric is enabled, and otherwise falls back to the datastore.
 
 ## Repository layout
 
@@ -42,11 +45,14 @@ When a Fabric operation fails (network unreachable), the gateway degrades gracef
 .
 ├── gateway.js                    # Express API gateway (entrypoint)
 ├── fabric-client.js              # Hyperledger Fabric gateway SDK wrapper
+├── iota-client.js                # IOTA Tangle (Notarization toolkit) adapter
 ├── supabase-db.js                # Supabase/Postgres persistence layer
 ├── supabase-schema.sql           # DDL for devices + access_logs tables
 ├── iot_simulator.py              # Edge device simulator (signed request stream)
 ├── start-all.bat                 # Launches gateway + frontend on login
 ├── .env.example                  # Backend environment template
+├── .iota-key.json                # Generated IOTA signer keypair (git-ignored)
+├── .iota-registry.json           # Device -> notarization mapping (git-ignored)
 ├── chaincode/
 │   └── device-registry/          # Fabric smart contract (fabric-contract-api)
 └── frontend/
@@ -215,6 +221,41 @@ The `device-registry` chaincode exposes the following transaction functions:
 | `DeleteDevice` | Remove a device record |
 
 The gateway connects through `fabric-client.js`, which reads connection profile and crypto material from the paths configured in `.env`. Deploy the chaincode to a running Fabric test-network before enabling `FABRIC_ENABLED=true`.
+
+## IOTA Tangle integration
+
+The gateway stores device identity on the IOTA Tangle via the [IOTA Notarization toolkit](https://github.com/iotaledger/notarization) (Rebased protocol). Every device is represented by a **Dynamic Notarization** object whose on-chain `state` holds `{ device_id, public_key, status }`; the object's immutable description stores the device ID and its metadata tracks the last update timestamp.
+
+### Publishing the Notarization package
+
+The toolkit's Move package must be published to the IOTA network once; the resulting package ID goes in `.env` as `IOTA_NOTARIZATION_PKG_ID`:
+
+1. Install the IOTA CLI: `cargo install iota --version 1.14.0` (requires Rust toolchain).
+2. Create a testnet environment and an account:
+   ```bash
+   iota client new-env --alias testnet --rpc https://api.testnet.iota.cafe
+   iota client switch --env testnet
+   iota client new-address ed25519
+   ```
+3. Fund the account with test tokens from the [testnet faucet](https://faucet.testnet.iota.cafe), then:
+   ```bash
+   iota client switch --address <YOUR_ADDRESS>
+   ```
+4. Clone the toolkit and publish:
+   ```bash
+   git clone https://github.com/iotaledger/notarization.git
+   cd notarization/notarization-move
+   ./scripts/publish_package.sh
+   ```
+5. Copy the printed package ID (e.g. `0x…`) into `IOTA_NOTARIZATION_PKG_ID`.
+
+### Runtime behavior
+
+- On startup, if `IOTA_ENABLED=true`, the gateway connects to the node (`IOTA_NODE_URL`, default `https://api.testnet.iota.cafe`), funds its signer address from the faucet when empty, and notarizes the seeded devices.
+- The gateway signer is an Ed25519 keypair: set `IOTA_PRIVATE_KEY` to pin it, otherwise a keypair is generated and persisted to `.iota-key.json`.
+- Device → notarization mappings are tracked locally in `.iota-registry.json` (created automatically).
+- `register`, `toggle`, and `revoke` operations update the device's on-chain state; reads fetch the live state from the Tangle.
+- The explorer URL for any notarization is `<IOTA_NODE_URL> + "/object/" + <notarization_id>` on the Rebased explorer.
 
 ## Security model
 

@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const fabric = require('./fabric-client');
+const iota = require('./iota-client');
 const db = require('./supabase-db');
 
 const app = express();
@@ -22,7 +23,7 @@ app.use((req, res, next) => {
 });
 
 // Gateway In-Memory State
-let activeRoute = 'FABRIC';
+let activeRoute = iota.isEnabled() && !fabric.isEnabled() ? 'IOTA' : 'FABRIC';
 let isStressTesting = false;
 let processedCount = 0;
 let requestCount = 0;
@@ -33,17 +34,36 @@ let devices = [
     { id: 'BioLab_Fridge', key: '0x12...77CD', publicKey: null, status: 'ACTIVE' }
 ];
 
-let ledgerMode = fabric.isEnabled() ? 'FABRIC' : 'MOCK';
+let ledgerMode = fabric.isEnabled() ? 'FABRIC' : (iota.isEnabled() ? 'IOTA' : 'MOCK');
 let ledgerError = null;
 let dbMode = db.isConfigured ? 'POSTGRES' : 'MEMORY';
 
+// Which backend should device reads/writes actually hit, given the
+// route selected in the console? Falls back to null (datastore/memory)
+// when the selected backend is not enabled.
+function activeBackend() {
+    if (activeRoute === 'IOTA' && iota.isEnabled()) return 'IOTA';
+    if (activeRoute === 'FABRIC' && fabric.isEnabled()) return 'FABRIC';
+    return null;
+}
+
 // Device Store Abstraction:
 //   - FABRIC mode  -> reads/writes device state via fabric-client (blockchain)
-//   - MOCK mode    -> reads/writes device state via Supabase Postgres when configured,
-//                     otherwise falls back to the in-memory array.
+//   - IOTA mode    -> reads/writes device state via iota-client (Tangle)
+//   - otherwise    -> Supabase Postgres when configured, else in-memory array.
 const deviceStore = {
     async getAll() {
-        if (ledgerMode === 'FABRIC') {
+        const backend = activeBackend();
+        if (backend === 'IOTA') {
+            try {
+                return await iota.getAllDevices();
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [IOTA] getAllDevices failed: ${err.message}`);
+                return dbMode === 'POSTGRES' ? await this._getAllPostgres() : devices;
+            }
+        }
+        if (backend === 'FABRIC') {
             try {
                 return await fabric.getAllDevices();
             } catch (err) {
@@ -66,7 +86,16 @@ const deviceStore = {
     },
 
     async get(id) {
-        if (ledgerMode === 'FABRIC') {
+        const backend = activeBackend();
+        if (backend === 'IOTA') {
+            try {
+                return await iota.getDevice(id);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [IOTA] getDevice failed: ${err.message}`);
+            }
+        }
+        if (backend === 'FABRIC') {
             try {
                 return await fabric.getDevice(id);
             } catch (err) {
@@ -86,9 +115,18 @@ const deviceStore = {
     },
 
     async register(id, key, publicKey) {
-        if (ledgerMode === 'FABRIC') {
+        const backend = activeBackend();
+        if (backend === 'IOTA') {
             try {
-                return await fabric.registerDevice(id, publicKey || key);
+                await iota.registerDevice(id, publicKey || key);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [IOTA] registerDevice failed: ${err.message}`);
+            }
+        }
+        if (backend === 'FABRIC') {
+            try {
+                await fabric.registerDevice(id, publicKey || key);
             } catch (err) {
                 ledgerError = err.message;
                 console.error(`   ⚠️ [FABRIC] registerDevice failed: ${err.message}`);
@@ -114,7 +152,16 @@ const deviceStore = {
     },
 
     async toggle(id) {
-        if (ledgerMode === 'FABRIC') {
+        const backend = activeBackend();
+        if (backend === 'IOTA') {
+            try {
+                return await iota.toggleDeviceStatus(id);
+            } catch (err) {
+                ledgerError = err.message;
+                console.error(`   ⚠️ [IOTA] toggleDeviceStatus failed: ${err.message}`);
+            }
+        }
+        if (backend === 'FABRIC') {
             try {
                 return await fabric.toggleDeviceStatus(id);
             } catch (err) {
@@ -460,5 +507,14 @@ if (dbMode === 'POSTGRES' && ledgerMode === 'MOCK') {
         console.log("   🌱 [POSTGRES] Initial devices seeded (no-op if already present).");
     }).catch(err => {
         console.error(`   ⚠️ [POSTGRES] Seeding failed: ${err.message}`);
+    });
+}
+
+// Seed initial devices onto the IOTA Tangle on startup (IOTA backend enabled).
+if (iota.isEnabled()) {
+    iota.initLedger(devices).then(() => {
+        console.log("   🌱 [IOTA] Initial devices notarized on the Tangle (no-op if already present).");
+    }).catch(err => {
+        console.error(`   ⚠️ [IOTA] Seeding failed: ${err.message}`);
     });
 }
