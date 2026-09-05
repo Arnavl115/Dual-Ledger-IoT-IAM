@@ -183,8 +183,21 @@ async function getDevice(id) {
     if (!notarizationId) {
         return null;
     }
-    const state = await readOnlyClient.state(notarizationId);
-    return stateToDevice(state);
+    // NOTE: @iota/notarization@0.1.14 WASM `readOnlyClient.state()` aborts
+    // the process on Node 26 ("null pointer passed to rust"), so reads go
+    // through plain JSON-RPC instead. The device JSON lives at
+    // fields.state.fields.data (verified on-chain 2026-09-05).
+    const obj = await iotaClient.getObject({
+        id: notarizationId,
+        options: { showContent: true },
+    });
+    const content = obj && obj.data && obj.data.content;
+    const data = content && content.fields && content.fields.state
+        && content.fields.state.fields && content.fields.state.fields.data;
+    if (!data) {
+        return null;
+    }
+    return stateToDevice({ data: Buffer.from(data) });
 }
 
 async function registerDevice(id, publicKey) {
