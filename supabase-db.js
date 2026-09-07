@@ -46,6 +46,13 @@ async function insertDevice(id, publicKey, status = 'ACTIVE') {
     if (error) throw error;
 }
 
+async function upsertDevice(id, publicKey, status) {
+    const { error } = await supabase
+        .from('devices')
+        .upsert({ id, public_key: publicKey, status }, { onConflict: 'id' });
+    if (error) throw error;
+}
+
 async function updateDeviceStatus(id, status) {
     const { error } = await supabase
         .from('devices')
@@ -102,6 +109,32 @@ async function insertAccessLog(logEntry) {
     if (error) throw error;
 }
 
+async function getAccessLogs({ limit = 100, offset = 0 } = {}) {
+    const { data, error, count } = await supabase
+        .from('access_logs')
+        .select('request_id, device_id, endpoint, status, route, hash, created_at', { count: 'exact' })
+        .order('created_at', { ascending: false })
+        .order('request_id', { ascending: false })
+        .range(offset, offset + limit - 1);
+    if (error) throw error;
+    return {
+        logs: (data || []).map(mapAccessLogRow),
+        total: count || 0,
+    };
+}
+
+async function claimAccessLog(logEntry) {
+    try {
+        await insertAccessLog(logEntry);
+        return true;
+    } catch (err) {
+        if (err.code === '23505' || String(err.message).includes('duplicate key')) {
+            return false;
+        }
+        throw err;
+    }
+}
+
 // -------------------------------
 // Helpers
 // -------------------------------
@@ -115,14 +148,29 @@ function mapDeviceRow(row) {
     };
 }
 
+function mapAccessLogRow(row) {
+    return {
+        id: row.request_id,
+        deviceId: row.device_id,
+        endpoint: row.endpoint,
+        status: row.status,
+        route: row.route,
+        hash: row.hash,
+        createdAt: row.created_at,
+    };
+}
+
 module.exports = {
     isConfigured,
     getAllDevices,
     getDevice,
     insertDevice,
+    upsertDevice,
     updateDeviceStatus,
     updateDevicePublicKey,
     deleteDevice,
     seedDevices,
     insertAccessLog,
+    getAccessLogs,
+    claimAccessLog,
 };

@@ -35,3 +35,4 @@ alter table public.access_logs enable row level security;
 -- Useful index for querying logs by device / status
 create index if not exists access_logs_device_idx on public.access_logs (device_id);
 create index if not exists access_logs_status_idx on public.access_logs (status);
+create index if not exists access_logs_created_at_idx on public.access_logs (created_at desc, request_id desc);

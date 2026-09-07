@@ -33,12 +33,18 @@ export default function AdminDashboard() {
     const [newDeviceKey, setNewDeviceKey] = useState('');
 
     // State synced with backend API
-    const [activeRoute, setActiveRoute] = useState('FABRIC');
+    const [activeRoute, setActiveRoute] = useState('MEMORY');
     const [isStressTesting, setIsStressTesting] = useState(false);
+    const [stressReport, setStressReport] = useState(null);
     const [devices, setDevices] = useState([]);
     const [liveLogs, setLiveLogs] = useState([]);
+    const [logTotal, setLogTotal] = useState(0);
+    const [logsLoading, setLogsLoading] = useState(false);
+    const [logsError, setLogsError] = useState(null);
     const [tpsData, setTpsData] = useState([]);
-    const [ledgerMode, setLedgerMode] = useState('MOCK');
+    const [activeBackend, setActiveBackend] = useState('MEMORY');
+    const [enabledRoutes, setEnabledRoutes] = useState([]);
+    const [routeError, setRouteError] = useState(null);
     const [ledgerError, setLedgerError] = useState(null);
 
     const chartRef = useRef(null);
@@ -46,8 +52,9 @@ export default function AdminDashboard() {
     const prevStressTesting = useRef(false);
 
     // True when a real distributed ledger (Fabric or IOTA) is the active backend.
-    const isLiveLedger = ledgerMode === 'FABRIC' || ledgerMode === 'IOTA';
-    const liveBackendName = ledgerMode === 'FABRIC' ? 'FABRIC' : ledgerMode === 'IOTA' ? 'IOTA TANGLE' : 'MOCK';
+    const isLiveLedger = activeBackend === 'FABRIC' || activeBackend === 'IOTA';
+    const isFallback = enabledRoutes.includes(activeRoute) && activeBackend !== activeRoute;
+    const liveBackendName = activeBackend === 'IOTA' ? 'IOTA TANGLE' : activeBackend;
 
     // Dynamic state polling from API Gateway
     useEffect(() => {
@@ -57,11 +64,12 @@ export default function AdminDashboard() {
                 if (res.ok) {
                     const data = await res.json();
                     setDevices(data.devices || []);
-                    setLiveLogs(data.logs || []);
                     setTpsData(data.tpsData || []);
-                    setActiveRoute(data.activeRoute || 'FABRIC');
+                    setActiveRoute(data.activeRoute || data.activeBackend || 'MEMORY');
+                    setActiveBackend(data.activeBackend || data.ledgerMode || 'MEMORY');
+                    setEnabledRoutes(data.enabledRoutes || []);
                     setIsStressTesting(data.isStressTesting || false);
-                    setLedgerMode(data.ledgerMode || 'MOCK');
+                    setStressReport(data.stressReport || null);
                     setLedgerError(data.ledgerError || null);
                 }
             } catch (err) {
@@ -74,6 +82,26 @@ export default function AdminDashboard() {
         return () => clearInterval(interval);
     }, []);
 
+    const fetchAuditLogs = async (offset = 0) => {
+        setLogsLoading(true);
+        setLogsError(null);
+        try {
+            const res = await apiGet(`/api/logs?limit=100&offset=${offset}`);
+            if (!res.ok) throw new Error(`Audit history request failed (${res.status})`);
+            const data = await res.json();
+            setLiveLogs(current => offset === 0 ? (data.logs || []) : [...current, ...(data.logs || [])]);
+            setLogTotal(data.total || 0);
+        } catch (err) {
+            setLogsError(err.message);
+        } finally {
+            setLogsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (view === 'logs') fetchAuditLogs();
+    }, [view]);
+
     // Listen to stress test transitions (true -> false) to trigger report modal
     useEffect(() => {
         if (prevStressTesting.current && !isStressTesting) {
@@ -84,14 +112,21 @@ export default function AdminDashboard() {
 
     // Backend route switch handler
     const switchRoute = async (route) => {
+        if (!enabledRoutes.includes(route)) return;
+        setRouteError(null);
         try {
             const res = await apiPost('/api/route', { route });
             if (res.ok) {
                 const data = await res.json();
                 setActiveRoute(data.activeRoute);
+                setActiveBackend(data.activeBackend);
+            } else {
+                const data = await res.json().catch(() => ({}));
+                setRouteError(data.error || 'Route switch failed');
             }
         } catch (err) {
             console.error("Error switching route:", err);
+            setRouteError(err.message);
         }
     };
 
@@ -108,14 +143,12 @@ export default function AdminDashboard() {
         }
     };
 
-    // Backend device registration — production: requires real PEM public key (no fake 0x...)
+    // Backend device registration requires a P-256 SPKI PEM public key.
     const handleAddDevice = async (e) => {
         e.preventDefault();
         if (!newDeviceId || !newDeviceKey) return;
         try {
-            const isPem = newDeviceKey.includes('-----BEGIN PUBLIC KEY-----');
-            const payload = isPem ? { id: newDeviceId, publicKey: newDeviceKey } : { id: newDeviceId, key: newDeviceKey };
-            const res = await apiPost('/api/devices/register', payload);
+            const res = await apiPost('/api/devices/register', { id: newDeviceId, publicKey: newDeviceKey });
             if (res.ok) {
                 const data = await res.json();
                 setDevices(data.devices);
@@ -124,7 +157,7 @@ export default function AdminDashboard() {
                 setIsAddDeviceModalOpen(false);
             } else {
                 const err = await res.json().catch(() => ({}));
-                alert(err.error || 'Registration failed — provide a valid PEM public key');
+                alert(err.error || 'Registration failed — provide a valid P-256 SPKI public key PEM');
             }
         } catch (err) {
             console.error("Error registering device:", err);
@@ -307,32 +340,35 @@ export default function AdminDashboard() {
                         <div className="flex flex-col gap-1.5">
                             <button
                                 onClick={() => switchRoute('FABRIC')}
-                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white'}`}
+                                disabled={!enabledRoutes.includes('FABRIC')}
+                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : enabledRoutes.includes('FABRIC') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
                             >
                                 <span>FABRIC</span>
                                 <Database className="w-3 h-3" />
                             </button>
                             <button
                                 onClick={() => switchRoute('IOTA')}
-                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white'}`}
+                                disabled={!enabledRoutes.includes('IOTA')}
+                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : enabledRoutes.includes('IOTA') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
                             >
                                 <span>IOTA TANGLE</span>
                                 <Zap className="w-3 h-3" />
                             </button>
                         </div>
+                        {routeError && <div className="mt-2 text-[8px] font-mono text-rose-500">{routeError}</div>}
                     </div>
                 </div>
 
                 <div className="border-t border-[#1e1e1e] pt-4">
                     <div className="flex items-center gap-2 mb-1">
-                        <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : ledgerError ? 'bg-rose-500' : 'bg-amber-500'} animate-ping`}></span>
-                        <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-400 uppercase ml-1">{isLiveLedger ? 'LIVE LEDGER' : ledgerError ? 'LEDGER ERROR' : 'MOCK MODE'}</span>
+                        <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : isFallback ? 'bg-amber-500' : activeBackend === 'POSTGRES' ? 'bg-emerald-500' : 'bg-amber-500'} animate-ping`}></span>
+                        <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-400 uppercase ml-1">{isLiveLedger ? 'LIVE LEDGER' : isFallback ? 'LEDGER FALLBACK' : activeBackend === 'POSTGRES' ? 'POSTGRES ACTIVE' : 'MEMORY MODE'}</span>
                     </div>
                     {isLiveLedger && (
                         <div className="text-[8px] font-mono text-emerald-500/70">{liveBackendName}: CONNECTED</div>
                     )}
-                    {!isLiveLedger && !ledgerError && (
-                        <div className="text-[8px] font-mono text-amber-500/70">IN-MEMORY STATE ACTIVE</div>
+                    {!isLiveLedger && !isFallback && (
+                        <div className="text-[8px] font-mono text-amber-500/70">{liveBackendName}: ACTIVE</div>
                     )}
                     {ledgerError && (
                         <div className="text-[8px] font-mono text-rose-500/70">FALLBACK: {ledgerError.slice(0, 40)}</div>
@@ -403,14 +439,16 @@ export default function AdminDashboard() {
                                 <div className="flex gap-2">
                                     <button
                                         onClick={() => { switchRoute('FABRIC'); setIsMobileMenuOpen(false); }}
-                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white'}`}
+                                        disabled={!enabledRoutes.includes('FABRIC')}
+                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : enabledRoutes.includes('FABRIC') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
                                     >
                                         <span>FABRIC</span>
                                         <Database className="w-3 h-3" />
                                     </button>
                                     <button
                                         onClick={() => { switchRoute('IOTA'); setIsMobileMenuOpen(false); }}
-                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white'}`}
+                                        disabled={!enabledRoutes.includes('IOTA')}
+                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : enabledRoutes.includes('IOTA') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
                                     >
                                         <span>IOTA</span>
                                         <Zap className="w-3 h-3" />
@@ -420,8 +458,8 @@ export default function AdminDashboard() {
                         </div>
                         <div className="border-t border-[#1e1e1e] pt-4 mt-6">
                             <div className="flex items-center gap-2">
-                                <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : ledgerError ? 'bg-rose-500' : 'bg-amber-500'}`}></span>
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">{isLiveLedger ? 'LIVE LEDGER' : ledgerError ? 'LEDGER ERROR' : 'MOCK MODE'}</span>
+                                <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : isFallback ? 'bg-amber-500' : activeBackend === 'POSTGRES' ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">{isLiveLedger ? 'LIVE LEDGER' : isFallback ? 'LEDGER FALLBACK' : activeBackend === 'POSTGRES' ? 'POSTGRES ACTIVE' : 'MEMORY MODE'}</span>
                             </div>
                             {ledgerError && (
                                 <div className="text-[8px] font-mono text-rose-500/70 mt-1">FALLBACK: {ledgerError.slice(0, 40)}</div>
@@ -468,12 +506,12 @@ export default function AdminDashboard() {
                                     <Database className={`w-4 h-4 flex-shrink-0 ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`} />
                                     <div>
                                         <div className={`text-[8px] font-bold tracking-[0.2em] uppercase ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
-                                            {ledgerError ? 'LEDGER BACKEND ERROR' : 'SIMULATION MODE ACTIVE'}
+                                            {isFallback ? 'LEDGER FALLBACK ACTIVE' : `${activeBackend} BACKEND ACTIVE`}
                                         </div>
                                         <div className="text-xs font-bold text-white tracking-tight uppercase mt-0.5">
-                                            {ledgerError
-                                                ? `LEDGER UNREACHABLE — RUNNING ON MOCK STATE`
-                                                : `NO DISTRIBUTED LEDGER ENABLED — RUNNING ON IN-MEMORY STATE`}
+                                            {isFallback
+                                                ? `${activeRoute} UNREACHABLE — USING ${activeBackend}`
+                                                : `NO DISTRIBUTED LEDGER ENABLED — USING ${activeBackend}`}
                                         </div>
                                         {ledgerError && (
                                             <div className="text-[9px] font-mono text-neutral-500 mt-1">REASON: {ledgerError}</div>
@@ -490,7 +528,7 @@ export default function AdminDashboard() {
 
                         {/* Stat Cards — production: live values only, no hardcoded demo */}
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                            {renderStatCard("01 // Active Ledger", <Server className="w-3.5 h-3.5 text-neutral-400" />, `${activeRoute} // ${ledgerMode}`)}
+                            {renderStatCard("01 // Active Backend", <Server className="w-3.5 h-3.5 text-neutral-400" />, isFallback ? `${activeBackend} // ${activeRoute} SELECTED` : activeBackend)}
                             {renderStatCard("02 // Live TPS (PEAK)", <Activity className="w-3.5 h-3.5 text-neutral-400" />, tpsData.length ? `${Math.max(...tpsData.map(d => d.tps))} TPS` : "0 TPS")}
                             {renderStatCard(
                                 "03 // Live Devices",
@@ -696,7 +734,15 @@ export default function AdminDashboard() {
                             <div className="mb-6 flex justify-between items-center">
                                 <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">07 // REAL-TIME IAM ROUTING LEDGER</span>
                                 <div className="flex items-center gap-4">
-                                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">LEDGER: {activeRoute}</span>
+                                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">{logTotal.toLocaleString()} RECORDS</span>
+                                    <button
+                                        onClick={() => fetchAuditLogs()}
+                                        disabled={logsLoading}
+                                        className="text-[10px] font-bold tracking-[0.2em] text-neutral-300 hover:text-white disabled:text-neutral-600 uppercase"
+                                    >
+                                        REFRESH
+                                    </button>
+                                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">SELECTED: {activeRoute}</span>
                                     <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${isLiveLedger ? 'text-emerald-400' : ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
                                         BACKEND: {liveBackendName}
                                     </span>
@@ -712,7 +758,7 @@ export default function AdminDashboard() {
                                 </div>
                             ) : (
                                 <div className="overflow-x-auto">
-                                    <table className="w-full text-left min-w-[750px]">
+                                    <table className="w-full text-left min-w-[900px]">
                                         <thead>
                                             <tr className="border-b border-[#1e1e1e] text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">
                                                 <th className="pb-4">Request ID</th>
@@ -721,6 +767,7 @@ export default function AdminDashboard() {
                                                 <th className="pb-4">Route Ledger</th>
                                                 <th className="pb-4">Status</th>
                                                 <th className="pb-4">Transaction Hash</th>
+                                                <th className="pb-4">Recorded At</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-[#121212]">
@@ -741,15 +788,28 @@ export default function AdminDashboard() {
                                                         </span>
                                                     </td>
                                                     <td className="py-3 font-mono text-[10px] text-neutral-500 group-hover:text-neutral-300 transition-luxury">{log.hash}</td>
+                                                    <td className="py-3 font-mono text-[10px] text-neutral-500 whitespace-nowrap">{log.createdAt ? new Date(log.createdAt).toLocaleString() : 'CURRENT SESSION'}</td>
                                                 </tr>
                                             ))}
                                             {liveLogs.length === 0 && (
                                                 <tr>
-                                                    <td colSpan="6" className="text-xs text-neutral-500 py-8 text-center uppercase tracking-wider">AWAITING REQUEST STREAM</td>
+                                                    <td colSpan="7" className="text-xs text-neutral-500 py-8 text-center uppercase tracking-wider">{logsLoading ? 'LOADING AUDIT HISTORY' : 'NO AUDIT RECORDS'}</td>
                                                 </tr>
                                             )}
                                         </tbody>
                                     </table>
+                                    {logsError && (
+                                        <div className="mt-5 text-xs text-rose-400 uppercase tracking-wider">{logsError}</div>
+                                    )}
+                                    {liveLogs.length < logTotal && (
+                                        <button
+                                            onClick={() => fetchAuditLogs(liveLogs.length)}
+                                            disabled={logsLoading}
+                                            className="mt-6 w-full border border-[#242424] py-3 text-[10px] font-bold tracking-[0.2em] text-neutral-400 hover:text-white hover:border-[#3a3a3a] disabled:text-neutral-600 uppercase transition-luxury"
+                                        >
+                                            {logsLoading ? 'LOADING' : `LOAD MORE (${liveLogs.length.toLocaleString()} / ${logTotal.toLocaleString()})`}
+                                        </button>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -816,7 +876,7 @@ export default function AdminDashboard() {
             )}
 
             {/* Custom Modal: Stress Test Complete Report */}
-            {isStressModalOpen && (
+            {isStressModalOpen && stressReport && (
                 <div className="fixed inset-0 z-50 bg-black/98 backdrop-blur-md flex items-center justify-center p-4 transition-luxury">
                     <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-8 max-w-lg w-full relative">
                         <button
@@ -834,32 +894,50 @@ export default function AdminDashboard() {
                             <div className="p-4 border border-emerald-950 bg-emerald-950/10 text-emerald-400 flex items-center gap-2">
                                 <ShieldCheck className="w-4 h-4 flex-shrink-0" />
                                 <div>
-                                    <div className="text-[8px] font-bold tracking-[0.2em] uppercase">SYSTEM LEVEL</div>
-                                    <div className="text-xs font-bold font-mono">GATEWAY STABLE UNDER HIGH LOAD (185 TPS)</div>
+                                     <div className="text-[8px] font-bold tracking-[0.2em] uppercase">SYSTEM LEVEL</div>
+                                     <div className="text-xs font-bold font-mono">
+                                         {stressReport.totalRequests > 0
+                                             ? `${stressReport.totalRequests} REQUESTS MEASURED OVER ${(stressReport.durationMs / 1000).toFixed(2)}S`
+                                             : 'NO /API/ACCESS TRAFFIC OBSERVED'}
+                                     </div>
                                 </div>
                             </div>
 
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="border border-[#1e1e1e] p-4">
-                                    <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">PEAK THROUGHPUT</span>
-                                    <div className="text-lg font-bold text-white mt-1">185 TPS</div>
+                                     <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">PEAK THROUGHPUT</span>
+                                     <div className="text-lg font-bold text-white mt-1">{stressReport.peakTps} TPS</div>
                                 </div>
                                 <div className="border border-[#1e1e1e] p-4">
-                                    <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">CONFIRMATION RATE</span>
-                                    <div className="text-lg font-bold text-white mt-1">100.00%</div>
+                                     <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">2XX RESPONSE RATE</span>
+                                     <div className="text-lg font-bold text-white mt-1">{stressReport.successRate.toFixed(2)}%</div>
                                 </div>
                             </div>
 
                             <div className="border border-[#1e1e1e] p-4 space-y-2">
-                                <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">ROUTE METRICS</span>
+                                <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">MEASURED METRICS</span>
                                 <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">HYPERLEDGER FABRIC:</span>
-                                    <span className="text-white">14.2 MS (AVG LATENCY)</span>
+                                    <span className="text-neutral-400">AVERAGE THROUGHPUT:</span>
+                                    <span className="text-white">{stressReport.averageTps.toFixed(2)} TPS</span>
                                 </div>
                                 <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">IOTA TANGLE:</span>
-                                    <span className="text-white">8.9 MS (AVG LATENCY)</span>
+                                    <span className="text-neutral-400">AVERAGE LATENCY:</span>
+                                    <span className="text-white">{stressReport.averageLatencyMs.toFixed(2)} MS</span>
                                 </div>
+                                <div className="flex justify-between text-xs font-mono">
+                                    <span className="text-neutral-400">P95 LATENCY:</span>
+                                    <span className="text-white">{stressReport.p95LatencyMs.toFixed(2)} MS</span>
+                                </div>
+                                <div className="flex justify-between text-xs font-mono">
+                                    <span className="text-neutral-400">RESPONSES:</span>
+                                    <span className="text-white">{stressReport.successfulRequests} 2XX / {stressReport.failedRequests} NON-2XX</span>
+                                </div>
+                                {stressReport.routes.map(route => (
+                                    <div key={route.route} className="flex justify-between text-xs font-mono">
+                                        <span className="text-neutral-400">{route.route}:</span>
+                                        <span className="text-white">{route.requests} REQ / {route.averageLatencyMs.toFixed(2)} MS AVG</span>
+                                    </div>
+                                ))}
                             </div>
                         </div>
 

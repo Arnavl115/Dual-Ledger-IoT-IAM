@@ -4,6 +4,7 @@ import json
 import sys
 import os
 import base64
+import getpass
 
 # Ensure emoji output renders correctly on Windows (cp1252 console default)
 if hasattr(sys.stdout, "reconfigure"):
@@ -25,34 +26,39 @@ except ImportError:
     print("Please install it by running: pip install cryptography")
     exit(1)
 
-GATEWAY_URL = "http://localhost:3000/api/access"
-DEVICES_URL = "http://localhost:3000/api/devices"
-REGISTER_URL = "http://localhost:3000/api/devices/register"
-KEY_FILE = "ecdsa_keys.json"
+GATEWAY_BASE_URL = os.environ.get("GATEWAY_BASE_URL", "http://localhost:3000").rstrip("/")
+GATEWAY_URL = f"{GATEWAY_BASE_URL}/api/access"
+DEVICES_URL = f"{GATEWAY_BASE_URL}/api/devices"
+REGISTER_URL = f"{GATEWAY_BASE_URL}/api/devices/register"
+KEY_FILE = os.environ.get("SIMULATOR_KEY_FILE", "ecdsa_keys.json")
 
 DEFAULT_DEVICES = ["SmartLock_FrontDoor", "ServerRack_A", "BioLab_Fridge", "Secure_Gateway_B"]
 ACTIONS = ["unlock", "lock", "ping_status"]
 
-def load_or_create_key(device_id):
-    keys = {}
+def load_keys():
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, "r") as f:
-            keys = json.load(f)
+            return json.load(f)
+    return {}
 
-    if device_id not in keys:
-        private_key = ec.generate_private_key(ec.SECP256R1())
-        private_pem = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ).decode()
-        keys[device_id] = private_pem
-        with open(KEY_FILE, "w") as f:
-            json.dump(keys, f, indent=2)
-    else:
-        private_key = serialization.load_pem_private_key(keys[device_id].encode(), password=None)
+def save_keys(keys):
+    temp_file = f"{KEY_FILE}.tmp"
+    with open(temp_file, "w") as f:
+        json.dump(keys, f, indent=2)
+    os.replace(temp_file, KEY_FILE)
 
-    return private_key
+def load_private_key(private_pem):
+    return serialization.load_pem_private_key(private_pem.encode(), password=None)
+
+def create_private_key():
+    return ec.generate_private_key(ec.SECP256R1())
+
+def private_key_pem(private_key):
+    return private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    ).decode()
 
 def public_key_pem(private_key):
     return private_key.public_key().public_bytes(
@@ -60,44 +66,131 @@ def public_key_pem(private_key):
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     ).decode()
 
+def same_public_key(left, right):
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    return left.strip().replace("\r\n", "\n") == right.strip().replace("\r\n", "\n")
+
 def sign_payload(private_key, raw_data_string):
     signature = private_key.sign(raw_data_string.encode(), ec.ECDSA(hashes.SHA256()))
     return base64.b64encode(signature).decode()
 
-def load_bearer_token():
-    token = os.environ.get("SUPABASE_ACCESS_TOKEN")
-    if token:
-        return token
-    if os.path.exists(".env"):
-        with open(".env", "r") as f:
+def file_config_value(file_path, name):
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("SUPABASE_SERVICE_ROLE_KEY="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                if line.startswith(f"{name}="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'") or None
     return None
 
-def register_device(device_id, private_key, bearer_token):
-    headers = {"Authorization": f"Bearer {bearer_token}"} if bearer_token else {}
-    try:
-        response = requests.post(REGISTER_URL, json={
-            "id": device_id,
-            "publicKey": public_key_pem(private_key)
-        }, headers=headers, timeout=2)
-        print(f"[REGISTERED] {device_id} -> HTTP {response.status_code}")
-    except Exception as e:
-        print(f"   ⚠️ [WARNING] Registration failed for {device_id}: {e}")
+def config_value(name):
+    value = os.environ.get(name) or file_config_value(".env", name)
+    if value:
+        return value
+    if name == "SUPABASE_ANON_KEY":
+        return file_config_value(os.path.join("frontend", ".env"), "VITE_SUPABASE_ANON_KEY")
+    return None
 
-def fetch_dynamic_devices():
+def validate_admin_access_token(token):
     try:
-        response = requests.get(DEVICES_URL, timeout=1.5)
-        if response.status_code == 200:
-            devices = response.json()
-            device_ids = [d['id'] for d in devices]
-            if device_ids:
-                return device_ids
-    except Exception:
-        pass
-    return DEFAULT_DEVICES
+        payload_segment = token.split(".")[1]
+        padding = "=" * (-len(payload_segment) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_segment + padding))
+    except Exception as exc:
+        raise RuntimeError("SIMULATOR_ACCESS_TOKEN must be a Supabase user JWT, not a service-role key") from exc
+    if claims.get("role") != "authenticated" or claims.get("app_metadata", {}).get("role") != "admin":
+        raise RuntimeError("Simulator authentication requires an admin user access token")
+    if claims.get("exp", 0) <= int(time.time()):
+        raise RuntimeError("Simulator access token is expired")
+    return token
+
+def load_bearer_token():
+    token = config_value("SIMULATOR_ACCESS_TOKEN")
+    if token:
+        return validate_admin_access_token(token)
+
+    supabase_url = config_value("SUPABASE_URL")
+    anon_key = config_value("SUPABASE_ANON_KEY")
+    email = config_value("SIMULATOR_EMAIL")
+    password = config_value("SIMULATOR_PASSWORD")
+    if not supabase_url or not anon_key:
+        raise RuntimeError(
+            "Set SIMULATOR_ACCESS_TOKEN, or configure SUPABASE_URL and the frontend anon key"
+        )
+    if sys.stdin.isatty():
+        email = email or input("Supabase admin email: ").strip()
+        password = password or getpass.getpass("Supabase admin password: ")
+    if not email or not password:
+        raise RuntimeError("Set SIMULATOR_EMAIL and SIMULATOR_PASSWORD for non-interactive use")
+
+    response = requests.post(
+        f"{supabase_url.rstrip('/')}/auth/v1/token?grant_type=password",
+        json={"email": email, "password": password},
+        headers={"apikey": anon_key, "Authorization": f"Bearer {anon_key}"},
+        timeout=10,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Supabase login failed: HTTP {response.status_code} {response.text}")
+    return validate_admin_access_token(response.json().get("access_token", ""))
+
+def register_device(device_id, private_key, bearer_token):
+    public_key = public_key_pem(private_key)
+    response = requests.post(REGISTER_URL, json={
+        "id": device_id,
+        "publicKey": public_key
+    }, headers={"Authorization": f"Bearer {bearer_token}"}, timeout=10)
+    if not response.ok:
+        raise RuntimeError(f"Registration failed for {device_id}: HTTP {response.status_code} {response.text}")
+    registered = next((device for device in response.json().get("devices", []) if device.get("id") == device_id), None)
+    if not registered or not same_public_key(registered.get("publicKey"), public_key):
+        raise RuntimeError(f"Gateway did not confirm the registered key for {device_id}")
+    print(f"[REGISTERED] {device_id} -> HTTP {response.status_code}")
+    return registered
+
+def fetch_devices(bearer_token):
+    response = requests.get(
+        DEVICES_URL,
+        headers={"Authorization": f"Bearer {bearer_token}"},
+        timeout=10,
+    )
+    if not response.ok:
+        raise RuntimeError(f"Device listing failed: HTTP {response.status_code} {response.text}")
+    devices = response.json()
+    if not isinstance(devices, list):
+        raise RuntimeError("Device listing returned an invalid response")
+    return devices
+
+def provision_devices(bearer_token):
+    stored_keys = load_keys()
+    registered_devices = {device["id"]: device for device in fetch_devices(bearer_token)}
+    device_keys = {}
+
+    for device_id in DEFAULT_DEVICES:
+        existing = registered_devices.get(device_id)
+        stored_pem = stored_keys.get(device_id)
+        if existing:
+            if not stored_pem:
+                raise RuntimeError(
+                    f"Device {device_id} already exists and is not owned by this simulator key store"
+                )
+            private_key = load_private_key(stored_pem)
+            if not same_public_key(existing.get("publicKey"), public_key_pem(private_key)):
+                raise RuntimeError(
+                    f"Device {device_id} has a different registered key; refusing to rotate it"
+                )
+            device_keys[device_id] = private_key
+            print(f"[VERIFIED] {device_id} uses the simulator-owned key")
+            continue
+
+        private_key = load_private_key(stored_pem) if stored_pem else create_private_key()
+        if not stored_pem:
+            stored_keys[device_id] = private_key_pem(private_key)
+            save_keys(stored_keys)
+        register_device(device_id, private_key, bearer_token)
+        device_keys[device_id] = private_key
+
+    return device_keys
 
 def generate_payload(device_ids, device_keys):
     device_id = random.choice(device_ids)
@@ -124,21 +217,19 @@ def run_simulator():
 
     sleep_time = 2.0
 
-    device_keys = {}
     bearer_token = load_bearer_token()
-    for device_id in DEFAULT_DEVICES:
-        private_key = load_or_create_key(device_id)
-        device_keys[device_id] = private_key
-        register_device(device_id, private_key, bearer_token)
+    device_keys = provision_devices(bearer_token)
     print()
 
     while True:
-        device_ids = fetch_dynamic_devices()
-        for device_id in device_ids:
-            if device_id not in device_keys:
-                private_key = load_or_create_key(device_id)
-                device_keys[device_id] = private_key
-                register_device(device_id, private_key, bearer_token)
+        registered_devices = {device["id"]: device for device in fetch_devices(bearer_token)}
+        device_ids = []
+        for device_id, private_key in device_keys.items():
+            registered = registered_devices.get(device_id)
+            if registered and same_public_key(registered.get("publicKey"), public_key_pem(private_key)):
+                device_ids.append(device_id)
+        if not device_ids:
+            raise RuntimeError("No simulator-owned devices remain registered with matching keys")
         payload = generate_payload(device_ids, device_keys)
         print(f"[GENERATED] {payload['device_id']} requesting '{payload['action']}'...")
         
@@ -176,3 +267,6 @@ if __name__ == "__main__":
         run_simulator()
     except KeyboardInterrupt:
         print("\n\n🛑 Simulator stopped by user. Goodbye!")
+    except RuntimeError as exc:
+        print(f"\n❌ [FATAL] {exc}", file=sys.stderr)
+        sys.exit(1)

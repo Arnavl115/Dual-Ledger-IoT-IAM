@@ -12,6 +12,7 @@ const utf8Decoder = new TextDecoder();
 const channelName = process.env.CHANNEL_NAME || 'mychannel';
 const chaincodeName = process.env.CHAINCODE_NAME || 'deviceregistry';
 const mspId = process.env.MSP_ID || 'Org1MSP';
+const identityName = process.env.FABRIC_IDENTITY || 'Admin@org1.example.com';
 
 const cryptoPath = process.env.CRYPTO_PATH || path.resolve(
     __dirname,
@@ -25,7 +26,7 @@ const cryptoPath = process.env.CRYPTO_PATH || path.resolve(
 const keyDirectoryPath = process.env.KEY_DIRECTORY_PATH || path.resolve(
     cryptoPath,
     'users',
-    'User1@org1.example.com',
+    identityName,
     'msp',
     'keystore'
 );
@@ -33,7 +34,7 @@ const keyDirectoryPath = process.env.KEY_DIRECTORY_PATH || path.resolve(
 const certDirectoryPath = process.env.CERT_DIRECTORY_PATH || path.resolve(
     cryptoPath,
     'users',
-    'User1@org1.example.com',
+    identityName,
     'msp',
     'signcerts'
 );

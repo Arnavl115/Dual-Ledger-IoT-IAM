@@ -16,8 +16,8 @@ start "IoT Frontend (port 5173)" cmd /k "cd /d %~dp0frontend && npm run dev"
 REM -- Wait for the servers to boot, then open the browser
 echo [3/3] Waiting for services to boot ...
 timeout /t 8 /nobreak >nul
-start http://127.0.0.1:5173
+start http://localhost:5173
 
 echo.
-echo All services started. Gateway: http://localhost:3000 | Frontend: http://127.0.0.1:5173
+echo All services started. Gateway: http://localhost:3000 | Frontend: http://localhost:5173
 echo Close the two service windows to stop everything.

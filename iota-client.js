@@ -6,7 +6,8 @@
 // Mirrors the fabric-client.js interface so the gateway can switch
 // between Fabric and IOTA transparently:
 //   isEnabled, initLedger, getAllDevices, getDevice,
-//   registerDevice, toggleDeviceStatus, revokeDevice, close
+//   registerDevice, toggleDeviceStatus, revokeDevice, activateDevice,
+//   updateDevicePublicKey, deleteDevice, close
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,6 +28,9 @@ let iotaClient = null;
 let readOnlyClient = null;
 let client = null;
 let registry = loadRegistry();
+let notarizationIdsByDevice = new Map(
+    Object.entries(registry).map(([deviceId, notarizationId]) => [deviceId, [notarizationId]])
+);
 
 function isEnabled() {
     return process.env.IOTA_ENABLED === 'true';
@@ -56,15 +60,19 @@ function loadOrCreateKeypair() {
 }
 
 function loadRegistry() {
-    try {
-        return JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    } catch {
-        return {};
+    if (!fs.existsSync(registryPath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object'
+        || Object.values(parsed).some(id => typeof id !== 'string')) {
+        throw new Error(`Invalid IOTA registry file: ${registryPath}`);
     }
+    return parsed;
 }
 
 function saveRegistry() {
-    fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+    const tempPath = `${registryPath}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(registry, null, 2), { mode: 0o600 });
+    fs.renameSync(tempPath, registryPath);
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -112,7 +120,13 @@ async function connect() {
     const keypair = loadOrCreateKeypair();
     const signer = new Ed25519KeypairSigner(keypair);
     client = await NotarizationClient.create(readOnlyClient, signer);
-    await ensureFunded(client.senderAddress());
+    try {
+        await ensureFunded(client.senderAddress());
+        await reconcileRegistry();
+    } catch (err) {
+        close();
+        throw err;
+    }
     console.log(`   🔗 [IOTA] Connected to ${nodeUrl} (package ${pkgId})`);
     return client;
 }
@@ -139,6 +153,59 @@ function stateToDevice(state) {
     };
 }
 
+function objectToDevice(object) {
+    const content = object && object.data && object.data.content;
+    const fields = content && content.fields;
+    const data = fields && fields.state && fields.state.fields && fields.state.fields.data;
+    if (!data) throw new Error(`IOTA notarization ${object && object.data ? object.data.objectId : 'unknown'} has no device state`);
+    return {
+        device: stateToDevice({ data: Buffer.from(data) }),
+        id: object.data.objectId,
+        version: BigInt(fields.state_version_count || 0),
+    };
+}
+
+async function reconcileRegistry() {
+    const recovered = new Map();
+    const recoveredIds = new Map();
+    let cursor = null;
+    do {
+        const page = await iotaClient.getOwnedObjects({
+            owner: client.senderAddress(),
+            cursor,
+            options: { showType: true, showContent: true },
+        });
+        for (const object of page.data || []) {
+            const type = object.data && object.data.type;
+            if (!type || !type.startsWith(`${pkgId}::notarization::Notarization<`)) continue;
+            const candidate = objectToDevice(object);
+            const ids = recoveredIds.get(candidate.device.id) || [];
+            ids.push(candidate.id);
+            recoveredIds.set(candidate.device.id, ids);
+            const existing = recovered.get(candidate.device.id);
+            const preferredId = registry[candidate.device.id];
+            if (!existing || candidate.version > existing.version
+                || (candidate.version === existing.version && candidate.id === preferredId)
+                || (candidate.version === existing.version && existing.id !== preferredId && candidate.id < existing.id)) {
+                recovered.set(candidate.device.id, candidate);
+            }
+        }
+        cursor = page.hasNextPage ? page.nextCursor : null;
+    } while (cursor);
+
+    const nextRegistry = Object.fromEntries(
+        Array.from(recovered.entries())
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([deviceId, value]) => [deviceId, value.id])
+    );
+    notarizationIdsByDevice = recoveredIds;
+    if (JSON.stringify(nextRegistry) !== JSON.stringify(registry)) {
+        registry = nextRegistry;
+        saveRegistry();
+        console.log(`   ♻️ [IOTA] Reconciled ${Object.keys(registry).length} device mapping(s) from the Tangle`);
+    }
+}
+
 async function writeState(device) {
     const c = await connect();
     const notarizationId = registry[device.id];
@@ -147,7 +214,6 @@ async function writeState(device) {
     }
     const state = State.fromString(deviceToState(device), new Date().toISOString());
     await c.updateState(state, notarizationId).buildAndExecute(c);
-    await c.updateMetadata(JSON.stringify({ lastChange: new Date().toISOString() }), notarizationId).buildAndExecute(c);
 }
 
 // ------------------------------------------------------------------
@@ -191,19 +257,13 @@ async function getDevice(id) {
         id: notarizationId,
         options: { showContent: true },
     });
-    const content = obj && obj.data && obj.data.content;
-    const data = content && content.fields && content.fields.state
-        && content.fields.state.fields && content.fields.state.fields.data;
-    if (!data) {
-        return null;
-    }
-    return stateToDevice({ data: Buffer.from(data) });
+    return objectToDevice(obj).device;
 }
 
 async function registerDevice(id, publicKey) {
     const c = await connect();
     if (registry[id]) {
-        return getDevice(id);
+        throw new Error(`Device ${id} already exists on the Tangle`);
     }
     const state = deviceToState({ id, publicKey, status: 'ACTIVE' });
     const { output } = await c
@@ -214,6 +274,7 @@ async function registerDevice(id, publicKey) {
         .finish()
         .buildAndExecute(c);
     registry[id] = output.id;
+    notarizationIdsByDevice.set(id, [output.id]);
     saveRegistry();
     return getDevice(id);
 }
@@ -238,6 +299,38 @@ async function revokeDevice(id) {
     return getDevice(id);
 }
 
+async function activateDevice(id) {
+    const device = await getDevice(id);
+    if (!device) return null;
+    if (device.status !== 'ACTIVE') {
+        device.status = 'ACTIVE';
+        await writeState(device);
+    }
+    return getDevice(id);
+}
+
+async function updateDevicePublicKey(id, publicKey) {
+    const device = await getDevice(id);
+    if (!device) return null;
+    device.publicKey = publicKey;
+    device.key = publicKey;
+    await writeState(device);
+    return getDevice(id);
+}
+
+async function deleteDevice(id) {
+    const c = await connect();
+    const notarizationIds = notarizationIdsByDevice.get(id) || (registry[id] ? [registry[id]] : []);
+    if (notarizationIds.length === 0) return false;
+    for (const notarizationId of new Set(notarizationIds)) {
+        await c.destroy(notarizationId).buildAndExecute(c);
+    }
+    delete registry[id];
+    notarizationIdsByDevice.delete(id);
+    saveRegistry();
+    return true;
+}
+
 function close() {
     // WASM clients manage their own resources; nothing to tear down here.
     client = null;
@@ -253,5 +346,8 @@ module.exports = {
     registerDevice,
     toggleDeviceStatus,
     revokeDevice,
+    activateDevice,
+    updateDevicePublicKey,
+    deleteDevice,
     close,
 };
