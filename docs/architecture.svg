@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="940" viewBox="0 0 1600 940" role="img" aria-labelledby="title description">
+  <title id="title">Dual-Ledger IoT IAM Gateway architecture</title>
+  <desc id="description">Production architecture showing IoT devices and administrators connecting through the React console and Express gateway to Hyperledger Fabric, IOTA, and Supabase.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2ff"/>
+    </linearGradient>
+    <linearGradient id="gateway" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172554"/>
+      <stop offset="1" stop-color="#312e81"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0f172a" flood-opacity=".12"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <style>
+      .heading { font: 700 30px Inter, Segoe UI, sans-serif; fill: #0f172a; }
+      .section { font: 700 16px Inter, Segoe UI, sans-serif; letter-spacing: 1.6px; fill: #475569; }
+      .label { font: 700 18px Inter, Segoe UI, sans-serif; fill: #0f172a; }
+      .copy { font: 400 14px Inter, Segoe UI, sans-serif; fill: #475569; }
+      .inverse-label { font: 700 19px Inter, Segoe UI, sans-serif; fill: #fff; }
+      .inverse-copy { font: 400 14px Inter, Segoe UI, sans-serif; fill: #c7d2fe; }
+      .box { fill: #fff; stroke: #cbd5e1; stroke-width: 1.5; rx: 14; filter: url(#shadow); }
+      .flow { fill: none; stroke: #64748b; stroke-width: 2; marker-end: url(#arrow); }
+      .boundary { fill: none; stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 7 7; rx: 20; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="940" fill="url(#background)"/>
+  <text x="800" y="52" text-anchor="middle" class="heading">Dual-Ledger IoT Identity and Access Gateway</text>
+  <text x="800" y="80" text-anchor="middle" class="copy">Production trust boundaries, authorization flow, and persistence</text>
+
+  <text x="70" y="135" class="section">CLIENTS AND DEVICES</text>
+  <rect x="50" y="155" width="300" height="650" class="boundary"/>
+  <rect x="85" y="205" width="230" height="105" class="box"/>
+  <circle cx="120" cy="242" r="15" fill="#4f46e5"/>
+  <text x="150" y="240" class="label">IoT device</text>
+  <text x="150" y="265" class="copy">P-256 key pair</text>
+  <text x="105" y="291" class="copy">device_id : action : timestamp</text>
+
+  <rect x="85" y="420" width="230" height="105" class="box"/>
+  <circle cx="120" cy="457" r="15" fill="#0f766e"/>
+  <text x="150" y="455" class="label">Administrator</text>
+  <text x="150" y="480" class="copy">Supabase Auth session</text>
+  <text x="105" y="506" class="copy">Browser-based operations</text>
+
+  <rect x="85" y="635" width="230" height="105" class="box"/>
+  <circle cx="120" cy="672" r="15" fill="#d97706"/>
+  <text x="150" y="670" class="label">Device simulator</text>
+  <text x="150" y="695" class="copy">Python + ECDSA P-256</text>
+  <text x="105" y="721" class="copy">Provisioning and test traffic</text>
+
+  <text x="445" y="135" class="section">APPLICATION BOUNDARY</text>
+  <rect x="405" y="155" width="550" height="650" class="boundary"/>
+  <rect x="455" y="205" width="230" height="105" class="box"/>
+  <text x="485" y="242" class="label">React admin console</text>
+  <text x="485" y="267" class="copy">Vite, live route control, audit UI</text>
+  <text x="485" y="291" class="copy">Supabase JWT + HTTPS API</text>
+
+  <rect x="455" y="390" width="450" height="230" rx="18" fill="url(#gateway)" filter="url(#shadow)"/>
+  <text x="680" y="435" text-anchor="middle" class="inverse-label">Express API Gateway</text>
+  <text x="680" y="462" text-anchor="middle" class="inverse-copy">Authentication, routing, and policy enforcement</text>
+  <line x1="490" y1="485" x2="870" y2="485" stroke="#6366f1"/>
+  <text x="500" y="522" class="inverse-copy">ECDSA P-256 verification</text>
+  <text x="500" y="551" class="inverse-copy">5-minute freshness + replay protection</text>
+  <text x="500" y="580" class="inverse-copy">Per-IP rate limiting</text>
+  <text x="710" y="522" class="inverse-copy">ACTIVE / REVOKED policy</text>
+  <text x="710" y="551" class="inverse-copy">Fail-closed ledger access</text>
+  <text x="710" y="580" class="inverse-copy">Durable audit recording</text>
+
+  <rect x="455" y="675" width="205" height="80" class="box"/>
+  <text x="480" y="708" class="label">Fabric adapter</text>
+  <text x="480" y="733" class="copy">Gateway SDK + gRPC TLS</text>
+  <rect x="700" y="675" width="205" height="80" class="box"/>
+  <text x="725" y="708" class="label">IOTA adapter</text>
+  <text x="725" y="733" class="copy">Dynamic Notarization</text>
+
+  <text x="1050" y="135" class="section">AUTHORITATIVE SERVICES</text>
+  <rect x="1010" y="155" width="540" height="650" class="boundary"/>
+  <rect x="1060" y="200" width="440" height="135" class="box"/>
+  <rect x="1060" y="200" width="10" height="135" rx="5" fill="#2563eb"/>
+  <text x="1100" y="240" class="label">Hyperledger Fabric</text>
+  <text x="1100" y="267" class="copy">mychannel / deviceregistry chaincode</text>
+  <text x="1100" y="292" class="copy">Device identity, key, status, and immutable history</text>
+  <text x="1100" y="317" class="copy">Organization admin policy for registry mutations</text>
+
+  <rect x="1060" y="405" width="440" height="135" class="box"/>
+  <rect x="1060" y="405" width="10" height="135" rx="5" fill="#7c3aed"/>
+  <text x="1100" y="445" class="label">IOTA Tangle</text>
+  <text x="1100" y="472" class="copy">One Dynamic Notarization object per device</text>
+  <text x="1100" y="497" class="copy">Ed25519-signed create, update, and destroy operations</text>
+  <text x="1100" y="522" class="copy">Recoverable local object registry</text>
+
+  <rect x="1060" y="610" width="440" height="135" class="box"/>
+  <rect x="1060" y="610" width="10" height="135" rx="5" fill="#0f766e"/>
+  <text x="1100" y="650" class="label">Supabase</text>
+  <text x="1100" y="677" class="copy">PostgreSQL devices projection and access_logs audit trail</text>
+  <text x="1100" y="702" class="copy">Authentication, ES256 JWKS, RLS, service-role backend</text>
+  <text x="1100" y="727" class="copy">Persistent replay claims and operational reporting</text>
+
+  <path d="M315 257 H455" class="flow"/>
+  <text x="385" y="245" text-anchor="middle" class="copy">signed HTTPS</text>
+  <path d="M315 472 H390 V257 H455" class="flow"/>
+  <text x="365" y="455" text-anchor="middle" class="copy">sign in</text>
+  <path d="M315 687 H380 V505 H455" class="flow"/>
+  <path d="M570 310 V390" class="flow"/>
+  <text x="588" y="354" class="copy">Bearer JWT</text>
+  <path d="M570 620 V675" class="flow"/>
+  <path d="M790 620 V675" class="flow"/>
+  <path d="M660 715 H980 V267 H1060" class="flow"/>
+  <path d="M905 715 H990 V472 H1060" class="flow"/>
+  <path d="M905 560 H980 V677 H1060" class="flow"/>
+
+  <rect x="405" y="845" width="1145" height="52" rx="12" fill="#e2e8f0"/>
+  <text x="977" y="877" text-anchor="middle" class="copy">Access decision: verify signature → resolve selected ledger state → enforce policy → atomically claim replay ID → persist audit result</text>
+</svg>
