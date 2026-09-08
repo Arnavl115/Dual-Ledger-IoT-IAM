@@ -1,13 +1,12 @@
 {
-  "name": "frontend",
+  "name": "dual-ledger-iot-iam",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "lint": "oxlint"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.112.3",
@@ -15,8 +14,7 @@
     "chart.js": "^4.5.1",
     "lucide-react": "^1.27.0",
     "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "recharts": "^3.10.1"
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

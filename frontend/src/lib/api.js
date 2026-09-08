@@ -1,6 +1,8 @@
 import { getAccessToken } from './supabase';
 
-const GATEWAY_URL = import.meta.env.VITE_GATEWAY_URL || 'http://localhost:3000';
+const GATEWAY_URL = import.meta.env.DEV
+    ? import.meta.env.VITE_GATEWAY_URL?.replace(/\/+$/, '') || 'http://localhost:3000'
+    : '';
 
 // Calls the backend gateway, automatically attaching the Supabase JWT
 // as "Authorization: Bearer <token>".
@@ -22,9 +24,10 @@ export async function apiFetch(path, options = {}) {
     });
 }
 
-export const apiGet = (path) => apiFetch(path);
+export const apiGet = (path, options) => apiFetch(path, options);
 export const apiPost = (path, body) =>
     apiFetch(path, {
         method: 'POST',
         body: JSON.stringify(body),
     });
+export const apiDelete = (path) => apiFetch(path, { method: 'DELETE' });

@@ -292,6 +292,32 @@ Build the production console directly with:
 npm --prefix frontend run build
 ```
 
+### Production Frontend Hosting
+
+The frontend ships as a multi-stage container. Vite runs only in the build stage; Nginx serves the immutable output and provides SPA routing, compression, cache policy, and a container health check. Browser API calls are same-origin, and Nginx forwards `/api/*` and `/health` to a gateway container reachable as `gateway:3000` on the same container network.
+
+Build the image with the public Supabase configuration:
+
+```bash
+docker build \
+  --build-arg VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co \
+  --build-arg VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY \
+  --tag dual-ledger-iot-iam:1.0.0 \
+  frontend
+```
+
+Run it on the same Docker network as the gateway, where the gateway container has the network alias `gateway`:
+
+```bash
+docker run --detach \
+  --name dual-ledger-iot-iam \
+  --network trust-gateway \
+  --publish 8080:8080 \
+  dual-ledger-iot-iam:1.0.0
+```
+
+`VITE_GATEWAY_URL` is used only by the local Vite development server. Production builds always use the same-origin proxy, preventing a local development URL from being embedded accidentally. HTTPS termination and the external reverse-proxy configuration are covered separately in the production operations setup.
+
 ## Production Checklist
 
 - [ ] Set `NODE_ENV=production` and an exact HTTPS `FRONTEND_URL`.

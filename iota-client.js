@@ -23,6 +23,7 @@ const faucetUrl = process.env.IOTA_FAUCET_URL || 'https://faucet.testnet.iota.ca
 const pkgId = process.env.IOTA_NOTARIZATION_PKG_ID || '';
 const registryPath = process.env.IOTA_REGISTRY_PATH || path.join(__dirname, '.iota-registry.json');
 const keyPath = process.env.IOTA_KEY_PATH || path.join(__dirname, '.iota-key.json');
+const MAX_OBJECTS_PER_READ = 50;
 
 let iotaClient = null;
 let readOnlyClient = null;
@@ -233,11 +234,20 @@ async function initLedger(seedDevices) {
 async function getAllDevices() {
     await connect();
     const results = [];
-    for (const deviceId of Object.keys(registry)) {
-        try {
-            results.push(await getDevice(deviceId));
-        } catch (err) {
-            console.error(`   ⚠️ [IOTA] getDevice(${deviceId}) failed: ${err.message}`);
+    const entries = Object.entries(registry);
+    for (let offset = 0; offset < entries.length; offset += MAX_OBJECTS_PER_READ) {
+        const batch = entries.slice(offset, offset + MAX_OBJECTS_PER_READ);
+        const objects = await iotaClient.multiGetObjects({
+            ids: batch.map(([, notarizationId]) => notarizationId),
+            options: { showContent: true },
+        });
+        for (let index = 0; index < batch.length; index++) {
+            const [deviceId] = batch[index];
+            try {
+                results.push(objectToDevice(objects[index]).device);
+            } catch (err) {
+                console.error(`   ⚠️ [IOTA] getDevice(${deviceId}) failed: ${err.message}`);
+            }
         }
     }
     return results;

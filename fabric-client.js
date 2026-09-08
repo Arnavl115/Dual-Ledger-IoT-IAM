@@ -138,6 +138,18 @@ async function getDevice(id) {
     }
 }
 
+async function getDeviceHistory(id) {
+    const c = await connectGateway();
+    const resultBytes = await c.evaluateTransaction('GetDeviceHistory', id);
+    const records = JSON.parse(utf8Decoder.decode(resultBytes));
+    return records.map(record => ({
+        txId: record.txId,
+        timestamp: record.timestamp,
+        isDelete: record.isDelete,
+        device: record.value ? toGatewayDevice(record.value) : null,
+    }));
+}
+
 async function registerDevice(id, publicKey) {
     const c = await connectGateway();
     await c.submitTransaction('RegisterDevice', id, publicKey);
@@ -213,6 +225,7 @@ module.exports = {
     initLedger,
     getAllDevices,
     getDevice,
+    getDeviceHistory,
     registerDevice,
     toggleDeviceStatus,
     revokeDevice,

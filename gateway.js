@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const fabric = require('./fabric-client');
 const iota = require('./iota-client');
 const db = require('./supabase-db');
+const { SimulatorKeyStore } = require('./simulator-key-store');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -94,6 +95,8 @@ let requestCount = 0;
 let devices = [];
 let ledgerError = null;
 let dbMode = db.isConfigured ? 'POSTGRES' : 'MEMORY';
+const simulatorKeys = new SimulatorKeyStore();
+const pendingDeviceOperations = new Set();
 const enabledRoutes = [
     ...(fabric.isEnabled() ? ['FABRIC'] : []),
     ...(iota.isEnabled() ? ['IOTA'] : []),
@@ -113,6 +116,29 @@ function activeBackend() {
 function markBackend(context, backend) {
     if (context) context.backend = backend;
     lastActiveBackend = backend;
+}
+
+function requireBothLedgers() {
+    const missing = ['FABRIC', 'IOTA'].filter(route => !enabledRoutes.includes(route));
+    if (missing.length) {
+        const error = new Error(`Both ledgers must be enabled; missing ${missing.join(' and ')}`);
+        error.status = 409;
+        throw error;
+    }
+}
+
+async function withDeviceOperation(deviceId, operation) {
+    if (pendingDeviceOperations.has(deviceId)) {
+        const error = new Error(`Another lifecycle operation is already running for ${deviceId}`);
+        error.status = 409;
+        throw error;
+    }
+    pendingDeviceOperations.add(deviceId);
+    try {
+        return await operation();
+    } finally {
+        pendingDeviceOperations.delete(deviceId);
+    }
 }
 
 // Device Store Abstraction:
@@ -262,6 +288,52 @@ const deviceStore = {
         return ledgerDevice;
     },
 
+    async registerSimulatorDevice(id, context) {
+        requireBothLedgers();
+        if (simulatorKeys.has(id)) throw new Error(`Simulator device ${id} already exists`);
+
+        const [fabricDevice, iotaDevice] = await Promise.all([
+            fabric.getDevice(id),
+            iota.getDevice(id),
+        ]);
+        if (fabricDevice || iotaDevice) throw new Error(`Device ${id} already exists on a ledger`);
+
+        const { publicKey, privateKey } = simulatorKeys.generateKeyPair();
+        const completed = [];
+        try {
+            const registeredFabricDevice = await fabric.registerDevice(id, publicKey);
+            completed.push('FABRIC');
+            await iota.registerDevice(id, publicKey);
+            completed.push('IOTA');
+            if (dbMode === 'POSTGRES') {
+                await db.upsertDevice(id, publicKey, 'ACTIVE');
+                completed.push('POSTGRES');
+            }
+            simulatorKeys.add(id, privateKey);
+            completed.push('SIMULATOR');
+            ledgerError = null;
+            markBackend(context, 'FABRIC+IOTA');
+            return registeredFabricDevice;
+        } catch (error) {
+            const rollbackErrors = [];
+            if (completed.includes('SIMULATOR')) {
+                try { simulatorKeys.remove(id); } catch (rollbackError) { rollbackErrors.push(`simulator: ${rollbackError.message}`); }
+            }
+            if (completed.includes('POSTGRES')) {
+                try { await db.deleteDevice(id); } catch (rollbackError) { rollbackErrors.push(`PostgreSQL: ${rollbackError.message}`); }
+            }
+            if (completed.includes('IOTA')) {
+                try { await iota.deleteDevice(id); } catch (rollbackError) { rollbackErrors.push(`IOTA: ${rollbackError.message}`); }
+            }
+            if (completed.includes('FABRIC')) {
+                try { await fabric.deleteDevice(id); } catch (rollbackError) { rollbackErrors.push(`Fabric: ${rollbackError.message}`); }
+            }
+            ledgerError = error.message;
+            const suffix = rollbackErrors.length ? `; rollback failed for ${rollbackErrors.join(', ')}` : '';
+            throw new Error(`${error.message}${suffix}`);
+        }
+    },
+
     async toggle(id, context) {
         const backend = activeBackend();
         if (backend === 'IOTA') {
@@ -393,6 +465,24 @@ const deviceStore = {
         if (backend === 'MEMORY') markBackend(context, 'MEMORY');
     },
 
+    async history(id, context) {
+        const backend = activeBackend();
+        if (backend !== 'FABRIC') {
+            const err = new Error(`Device history is unavailable for the ${backend} backend`);
+            err.status = 409;
+            throw err;
+        }
+        try {
+            const history = await fabric.getDeviceHistory(id);
+            ledgerError = null;
+            markBackend(context, 'FABRIC');
+            return history;
+        } catch (err) {
+            ledgerError = err.message;
+            throw err;
+        }
+    },
+
     async remove(id, context) {
         const backend = activeBackend();
         if (backend === 'FABRIC') {
@@ -435,6 +525,48 @@ const deviceStore = {
         }
         devices = devices.filter(d => d.id !== id);
         if (backend === 'MEMORY') markBackend(context, 'MEMORY');
+    },
+
+    async removeSimulatorDevice(id, context) {
+        requireBothLedgers();
+        const [fabricDevice, iotaDevice] = await Promise.all([
+            fabric.getDevice(id),
+            iota.getDevice(id),
+        ]);
+        if (!fabricDevice && !iotaDevice && !simulatorKeys.has(id)) {
+            const error = new Error(`Device ${id} does not exist`);
+            error.status = 404;
+            throw error;
+        }
+
+        // Stop request generation before removing either authoritative identity.
+        simulatorKeys.remove(id);
+        const deletions = await Promise.allSettled([
+            fabricDevice ? fabric.deleteDevice(id) : Promise.resolve(),
+            iotaDevice ? iota.deleteDevice(id) : Promise.resolve(),
+        ]);
+        const failures = deletions
+            .map((result, index) => result.status === 'rejected'
+                ? `${index === 0 ? 'Fabric' : 'IOTA'}: ${result.reason.message}`
+                : null)
+            .filter(Boolean);
+
+        if (dbMode === 'POSTGRES') {
+            try {
+                await db.deleteDevice(id);
+            } catch (error) {
+                failures.push(`PostgreSQL: ${error.message}`);
+            }
+        }
+        devices = devices.filter(device => device.id !== id);
+        if (failures.length) {
+            ledgerError = failures.join('; ');
+            const error = new Error(`Device removal was incomplete: ${ledgerError}`);
+            error.status = 502;
+            throw error;
+        }
+        ledgerError = null;
+        markBackend(context, 'FABRIC+IOTA');
     }
 };
 
@@ -750,6 +882,20 @@ app.get('/api/devices', requireAuth, async (req, res) => {
     res.status(200).json(deviceList);
 });
 
+app.get('/api/devices/:id/history', requireAuth, async (req, res) => {
+    const backendContext = {};
+    try {
+        const history = await deviceStore.history(req.params.id, backendContext);
+        return res.status(200).json({
+            deviceId: req.params.id,
+            backend: backendContext.backend,
+            history,
+        });
+    } catch (err) {
+        return res.status(err.status || 500).json({ error: err.message });
+    }
+});
+
 app.get('/api/logs', requireAuth, async (req, res) => {
     const requestedLimit = Number.parseInt(req.query.limit, 10);
     const requestedOffset = Number.parseInt(req.query.offset, 10);
@@ -806,27 +952,32 @@ app.post('/api/devices/toggle', requireAuth, async (req, res) => {
 });
 
 app.post('/api/devices/register', requireAuth, async (req, res) => {
-    const { id, publicKey } = req.body;
+    const { id, publicKey, simulatorManaged = false } = req.body;
     if (typeof id !== 'string' || !id) return res.status(400).json({ error: 'Missing device parameters' });
-    if (!validatePublicKeyPem(publicKey)) return res.status(400).json({ error: 'A valid P-256 SPKI publicKey PEM is required' });
+    if (!simulatorManaged && !validatePublicKeyPem(publicKey)) return res.status(400).json({ error: 'A valid P-256 SPKI publicKey PEM is required' });
     const formattedId = id.trim().replace(/\s+/g, '_');
     if (formattedId.length < 3 || formattedId.length > 64) return res.status(400).json({ error: 'Device ID must be 3-64 chars' });
     if (!/^[A-Za-z0-9_-]+$/.test(formattedId)) return res.status(400).json({ error: 'Device ID may only contain alphanumeric, underscore, hyphen' });
     const backendContext = {};
     try {
-        await deviceStore.register(formattedId, null, publicKey, backendContext);
+        await withDeviceOperation(formattedId, () => simulatorManaged
+            ? deviceStore.registerSimulatorDevice(formattedId, backendContext)
+            : deviceStore.register(formattedId, null, publicKey, backendContext));
     } catch (err) {
         if (String(err.message).includes('already exists')) {
             return res.status(409).json({ error: `Registration failed: ${err.message}` });
         }
-        return res.status(500).json({ error: `Registration failed: ${err.message}` });
+        return res.status(err.status || 500).json({ error: `Registration failed: ${err.message}` });
     }
+    const registeredPublicKey = simulatorManaged
+        ? (await fabric.getDevice(formattedId)).publicKey
+        : publicKey;
     const existing = devices.find(d => d.id === formattedId);
     if (existing) {
-        existing.key = publicKey;
-        existing.publicKey = publicKey;
+        existing.key = registeredPublicKey;
+        existing.publicKey = registeredPublicKey;
     } else {
-        devices.push({ id: formattedId, key: publicKey, publicKey, status: 'ACTIVE' });
+        devices.push({ id: formattedId, key: registeredPublicKey, publicKey: registeredPublicKey, status: 'ACTIVE' });
     }
     const logEntry = {
         id: `REQ-REG-${crypto.randomUUID()}`,
@@ -834,7 +985,7 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
         endpoint: '/api/v1/register',
         status: 'REGISTERED',
         route: backendContext.backend || activeBackend(),
-        hash: `${publicKey.substring(0, 6)}...${publicKey.substring(publicKey.length - 6)}`
+        hash: `${registeredPublicKey.substring(0, 6)}...${registeredPublicKey.substring(registeredPublicKey.length - 6)}`
     };
     try {
         await recordAccessLog(logEntry);
@@ -888,11 +1039,13 @@ app.post('/api/devices/update-key', requireAuth, async (req, res) => {
 app.delete('/api/devices/:id', requireAuth, async (req, res) => {
     const id = req.params.id;
     try {
-        await deviceStore.remove(id);
+        await withDeviceOperation(id, () => simulatorKeys.has(id)
+            ? deviceStore.removeSimulatorDevice(id)
+            : deviceStore.remove(id));
         const list = await deviceStore.getAll();
         res.status(200).json({ devices: list });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 

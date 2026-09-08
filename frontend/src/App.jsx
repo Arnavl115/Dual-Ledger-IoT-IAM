@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { LoaderCircle, Network } from 'lucide-react';
+import { LoaderCircle } from 'lucide-react';
 import AdminDashboard from './AdminDashboard';
 import Login from './Login';
 import { supabase } from './lib/supabase';
@@ -28,11 +28,10 @@ function App() {
 
     if (loading) {
         return (
-            <div className="session-loading" role="status">
-                <div className="session-loading__mark"><Network /></div>
+            <div className="session-loading" role="status" aria-live="polite">
                 <LoaderCircle className="spin" />
                 <div>
-                    <strong>Trust Gateway</strong>
+                    <strong>Dual Ledger IoT IAM</strong>
                     <span>Restoring secure session</span>
                 </div>
             </div>
