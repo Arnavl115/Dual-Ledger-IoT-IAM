@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { LoaderCircle, Network } from 'lucide-react';
 import AdminDashboard from './AdminDashboard';
 import Login from './Login';
 import { supabase } from './lib/supabase';
@@ -27,9 +28,12 @@ function App() {
 
     if (loading) {
         return (
-            <div className="min-h-screen bg-black flex items-center justify-center">
-                <div className="text-[10px] font-bold tracking-[0.3em] text-neutral-500 uppercase">
-                    INITIALIZING SECURE SESSION...
+            <div className="session-loading" role="status">
+                <div className="session-loading__mark"><Network /></div>
+                <LoaderCircle className="spin" />
+                <div>
+                    <strong>Trust Gateway</strong>
+                    <span>Restoring secure session</span>
                 </div>
             </div>
         );

@@ -1,17 +1,25 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-    ShieldCheck,
     Activity,
+    AlertCircle,
+    ArrowRight,
+    Check,
+    CircleGauge,
     Cpu,
     Database,
-    Zap,
-    Play,
-    Server,
-    PlusCircle,
+    FileClock,
+    LayoutDashboard,
+    LoaderCircle,
+    LogOut,
     Menu,
+    Network,
+    Play,
+    Plus,
+    RefreshCw,
+    Server,
+    ShieldCheck,
     X,
-    ArrowRight,
-    LogOut
+    Zap,
 } from 'lucide-react';
 import { Chart, registerables } from 'chart.js';
 import { apiGet, apiPost } from './lib/api';
@@ -19,936 +27,604 @@ import { supabase } from './lib/supabase';
 
 Chart.register(...registerables);
 
+const NAV_ITEMS = [
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'devices', label: 'Devices', icon: Cpu },
+    { id: 'logs', label: 'Request log', icon: FileClock },
+];
+
+function Brand({ compact = false }) {
+    return (
+        <div className={`brand ${compact ? 'brand--compact' : ''}`}>
+            <div className="brand__mark" aria-hidden="true"><Network /></div>
+            <div>
+                <strong>Trust Gateway</strong>
+                {!compact && <span>Dual-ledger identity control</span>}
+            </div>
+        </div>
+    );
+}
+
+function StatusBadge({ status }) {
+    const tone = status === 'ACTIVE' || status === 'GRANTED' || status === 'REGISTERED'
+        ? 'positive'
+        : status === 'REVOKED'
+            ? 'negative'
+            : 'warning';
+    return <span className={`status-badge status-badge--${tone}`}>{status}</span>;
+}
+
+function EmptyState({ icon: Icon, title, detail }) {
+    return (
+        <div className="empty-state">
+            <Icon aria-hidden="true" />
+            <strong>{title}</strong>
+            <span>{detail}</span>
+        </div>
+    );
+}
+
+function Modal({ title, eyebrow, onClose, children, size = 'default' }) {
+    const panelRef = useRef(null);
+
+    useEffect(() => {
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        if (!panelRef.current?.contains(document.activeElement)) panelRef.current?.focus();
+        return () => { document.body.style.overflow = previousOverflow; };
+    }, []);
+
+    const handleKeyDown = (event) => {
+        if (event.key === 'Escape') onClose();
+        if (event.key !== 'Tab') return;
+        const controls = panelRef.current?.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), textarea:not([disabled])'
+        );
+        if (!controls?.length) return;
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    };
+
+    return (
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+            <section
+                ref={panelRef}
+                className={`modal modal--${size}`}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="modal-title"
+                tabIndex={-1}
+                onKeyDown={handleKeyDown}
+            >
+                <header className="modal__header">
+                    <div>
+                        <span className="eyebrow">{eyebrow}</span>
+                        <h2 id="modal-title">{title}</h2>
+                    </div>
+                    <button className="icon-button" type="button" onClick={onClose} aria-label="Close dialog">
+                        <X />
+                    </button>
+                </header>
+                {children}
+            </section>
+        </div>
+    );
+}
+
+function RouteRail({ activeRoute, activeBackend, enabledRoutes, switching, onSwitch }) {
+    return (
+        <div className="route-rail" aria-label="Ledger route">
+            {['FABRIC', 'IOTA'].map((route, index) => {
+                const enabled = enabledRoutes.includes(route);
+                const selected = activeRoute === route;
+                const Icon = route === 'FABRIC' ? Database : Zap;
+                return (
+                    <div className="route-rail__segment" key={route}>
+                        {index > 0 && <span className="route-rail__line" aria-hidden="true" />}
+                        <button
+                            type="button"
+                            className={`route-node ${selected ? 'route-node--selected' : ''}`}
+                            onClick={() => onSwitch(route)}
+                            disabled={!enabled || Boolean(switching)}
+                            aria-pressed={selected}
+                            title={enabled ? `Route requests through ${route}` : `${route} is disabled on the gateway`}
+                        >
+                            <span className="route-node__icon"><Icon /></span>
+                            <span>
+                                <strong>{route === 'FABRIC' ? 'Hyperledger' : 'IOTA'}</strong>
+                                <small>{enabled ? (selected ? 'Selected' : 'Available') : 'Disabled'}</small>
+                            </span>
+                            {switching === route ? <LoaderCircle className="spin" /> : selected ? <Check /> : null}
+                        </button>
+                    </div>
+                );
+            })}
+            <p>
+                Active reads: <strong>{activeBackend === 'IOTA' ? 'IOTA Tangle' : activeBackend}</strong>
+            </p>
+        </div>
+    );
+}
+
 export default function AdminDashboard() {
-    // Navigation State
     const [view, setView] = useState('overview');
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-
-    // Modals State
     const [isStressModalOpen, setIsStressModalOpen] = useState(false);
     const [isAddDeviceModalOpen, setIsAddDeviceModalOpen] = useState(false);
-
-    // Form State
     const [newDeviceId, setNewDeviceId] = useState('');
     const [newDeviceKey, setNewDeviceKey] = useState('');
-
-    // State synced with backend API
     const [activeRoute, setActiveRoute] = useState('MEMORY');
+    const [activeBackend, setActiveBackend] = useState('MEMORY');
+    const [enabledRoutes, setEnabledRoutes] = useState([]);
     const [isStressTesting, setIsStressTesting] = useState(false);
     const [stressReport, setStressReport] = useState(null);
     const [devices, setDevices] = useState([]);
     const [liveLogs, setLiveLogs] = useState([]);
     const [logTotal, setLogTotal] = useState(0);
     const [logsLoading, setLogsLoading] = useState(false);
-    const [logsError, setLogsError] = useState(null);
+    const [logsError, setLogsError] = useState('');
     const [tpsData, setTpsData] = useState([]);
-    const [activeBackend, setActiveBackend] = useState('MEMORY');
-    const [enabledRoutes, setEnabledRoutes] = useState([]);
-    const [routeError, setRouteError] = useState(null);
-    const [ledgerError, setLedgerError] = useState(null);
-
+    const [ledgerError, setLedgerError] = useState('');
+    const [gatewayError, setGatewayError] = useState('');
+    const [actionError, setActionError] = useState('');
+    const [routeSwitching, setRouteSwitching] = useState('');
+    const [deviceUpdating, setDeviceUpdating] = useState('');
+    const [registering, setRegistering] = useState(false);
     const chartRef = useRef(null);
     const chartInstance = useRef(null);
     const prevStressTesting = useRef(false);
 
-    // True when a real distributed ledger (Fabric or IOTA) is the active backend.
     const isLiveLedger = activeBackend === 'FABRIC' || activeBackend === 'IOTA';
     const isFallback = enabledRoutes.includes(activeRoute) && activeBackend !== activeRoute;
-    const liveBackendName = activeBackend === 'IOTA' ? 'IOTA TANGLE' : activeBackend;
+    const activeDevices = devices.filter((device) => device.status === 'ACTIVE').length;
+    const peakTps = tpsData.length ? Math.max(...tpsData.map((point) => point.tps)) : 0;
+    const currentView = NAV_ITEMS.find((item) => item.id === view);
+    const hasOpenModal = isAddDeviceModalOpen || (isStressModalOpen && Boolean(stressReport));
 
-    // Dynamic state polling from API Gateway
     useEffect(() => {
         const fetchState = async () => {
             try {
                 const res = await apiGet('/api/state');
-                if (res.ok) {
-                    const data = await res.json();
-                    setDevices(data.devices || []);
-                    setTpsData(data.tpsData || []);
-                    setActiveRoute(data.activeRoute || data.activeBackend || 'MEMORY');
-                    setActiveBackend(data.activeBackend || data.ledgerMode || 'MEMORY');
-                    setEnabledRoutes(data.enabledRoutes || []);
-                    setIsStressTesting(data.isStressTesting || false);
-                    setStressReport(data.stressReport || null);
-                    setLedgerError(data.ledgerError || null);
-                }
-            } catch (err) {
-                console.warn("Gateway backend offline. Retrying connection...", err.message);
+                if (!res.ok) throw new Error(`Gateway returned ${res.status}`);
+                const data = await res.json();
+                setDevices(data.devices || []);
+                setTpsData(data.tpsData || []);
+                setActiveRoute(data.activeRoute || data.activeBackend || 'MEMORY');
+                setActiveBackend(data.activeBackend || data.ledgerMode || 'MEMORY');
+                setEnabledRoutes(data.enabledRoutes || []);
+                setIsStressTesting(Boolean(data.isStressTesting));
+                setStressReport(data.stressReport || null);
+                setLedgerError(data.ledgerError || '');
+                setGatewayError('');
+            } catch (error) {
+                setGatewayError(`Gateway unavailable. Retrying automatically. ${error.message}`);
             }
         };
-
         fetchState();
-        const interval = setInterval(fetchState, 1000);
+        const interval = setInterval(fetchState, 1500);
         return () => clearInterval(interval);
     }, []);
 
     const fetchAuditLogs = async (offset = 0) => {
         setLogsLoading(true);
-        setLogsError(null);
+        setLogsError('');
         try {
             const res = await apiGet(`/api/logs?limit=100&offset=${offset}`);
             if (!res.ok) throw new Error(`Audit history request failed (${res.status})`);
             const data = await res.json();
-            setLiveLogs(current => offset === 0 ? (data.logs || []) : [...current, ...(data.logs || [])]);
+            setLiveLogs((current) => offset === 0 ? (data.logs || []) : [...current, ...(data.logs || [])]);
             setLogTotal(data.total || 0);
-        } catch (err) {
-            setLogsError(err.message);
+        } catch (error) {
+            setLogsError(error.message);
         } finally {
             setLogsLoading(false);
         }
     };
 
     useEffect(() => {
-        if (view === 'logs') fetchAuditLogs();
+        if (view === 'overview' || view === 'logs') fetchAuditLogs();
     }, [view]);
 
-    // Listen to stress test transitions (true -> false) to trigger report modal
     useEffect(() => {
-        if (prevStressTesting.current && !isStressTesting) {
-            setIsStressModalOpen(true);
-        }
+        if (prevStressTesting.current && !isStressTesting && stressReport) setIsStressModalOpen(true);
         prevStressTesting.current = isStressTesting;
-    }, [isStressTesting]);
+    }, [isStressTesting, stressReport]);
 
-    // Backend route switch handler
+    useEffect(() => {
+        if (!isMobileMenuOpen) return undefined;
+        const closeOnEscape = (event) => event.key === 'Escape' && setIsMobileMenuOpen(false);
+        document.addEventListener('keydown', closeOnEscape);
+        return () => document.removeEventListener('keydown', closeOnEscape);
+    }, [isMobileMenuOpen]);
+
+    useEffect(() => {
+        if (!chartRef.current || isStressTesting || !tpsData.length || view !== 'overview') return undefined;
+        chartInstance.current?.destroy();
+        chartInstance.current = new Chart(chartRef.current.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: tpsData.map((point) => point.time),
+                datasets: [{
+                    data: tpsData.map((point) => point.tps),
+                    borderColor: '#adceff',
+                    borderWidth: 2,
+                    pointBackgroundColor: '#0a0f17',
+                    pointBorderColor: '#3131ff',
+                    pointBorderWidth: 2,
+                    pointRadius: 2,
+                    pointHoverRadius: 4,
+                    fill: false,
+                    tension: 0.25,
+                }],
+            },
+            options: {
+                animation: false,
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { intersect: false, mode: 'index' },
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        backgroundColor: '#171d26',
+                        titleColor: '#e3eaf6',
+                        bodyColor: '#a8b2c0',
+                        borderColor: '#545e6e',
+                        borderWidth: 1,
+                        cornerRadius: 8,
+                        padding: 10,
+                        displayColors: false,
+                        titleFont: { family: 'IBM Plex Sans', size: 12, weight: '600' },
+                        bodyFont: { family: 'IBM Plex Mono', size: 11 },
+                    },
+                },
+                scales: {
+                    x: {
+                        grid: { display: false },
+                        border: { display: false },
+                        ticks: { color: '#8892a1', maxTicksLimit: 6, font: { family: 'IBM Plex Mono', size: 10 } },
+                    },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: '#253041' },
+                        border: { display: false },
+                        ticks: { color: '#8892a1', precision: 0, font: { family: 'IBM Plex Mono', size: 10 } },
+                    },
+                },
+            },
+        });
+        return () => {
+            chartInstance.current?.destroy();
+            chartInstance.current = null;
+        };
+    }, [tpsData, isStressTesting, view]);
+
     const switchRoute = async (route) => {
-        if (!enabledRoutes.includes(route)) return;
-        setRouteError(null);
+        if (!enabledRoutes.includes(route) || routeSwitching) return;
+        setRouteSwitching(route);
+        setActionError('');
         try {
             const res = await apiPost('/api/route', { route });
-            if (res.ok) {
-                const data = await res.json();
-                setActiveRoute(data.activeRoute);
-                setActiveBackend(data.activeBackend);
-            } else {
-                const data = await res.json().catch(() => ({}));
-                setRouteError(data.error || 'Route switch failed');
-            }
-        } catch (err) {
-            console.error("Error switching route:", err);
-            setRouteError(err.message);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Route switch failed');
+            setActiveRoute(data.activeRoute);
+            setActiveBackend(data.activeBackend);
+        } catch (error) {
+            setActionError(error.message);
+        } finally {
+            setRouteSwitching('');
         }
     };
 
-    // Backend device status toggle
     const toggleDeviceStatus = async (deviceId) => {
+        setDeviceUpdating(deviceId);
+        setActionError('');
         try {
             const res = await apiPost('/api/devices/toggle', { deviceId });
-            if (res.ok) {
-                const data = await res.json();
-                setDevices(data.devices);
-            }
-        } catch (err) {
-            console.error("Error toggling device status:", err);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Could not update device status');
+            setDevices(data.devices || []);
+        } catch (error) {
+            setActionError(error.message);
+        } finally {
+            setDeviceUpdating('');
         }
     };
 
-    // Backend device registration requires a P-256 SPKI PEM public key.
-    const handleAddDevice = async (e) => {
-        e.preventDefault();
-        if (!newDeviceId || !newDeviceKey) return;
+    const handleAddDevice = async (event) => {
+        event.preventDefault();
+        if (!newDeviceId.trim() || !newDeviceKey.trim()) return;
+        setRegistering(true);
+        setActionError('');
         try {
             const res = await apiPost('/api/devices/register', { id: newDeviceId, publicKey: newDeviceKey });
-            if (res.ok) {
-                const data = await res.json();
-                setDevices(data.devices);
-                setNewDeviceId('');
-                setNewDeviceKey('');
-                setIsAddDeviceModalOpen(false);
-            } else {
-                const err = await res.json().catch(() => ({}));
-                alert(err.error || 'Registration failed — provide a valid P-256 SPKI public key PEM');
-            }
-        } catch (err) {
-            console.error("Error registering device:", err);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Registration failed');
+            setDevices(data.devices || []);
+            setNewDeviceId('');
+            setNewDeviceKey('');
+            setIsAddDeviceModalOpen(false);
+        } catch (error) {
+            setActionError(error.message);
+        } finally {
+            setRegistering(false);
         }
     };
 
-    // Backend stress test trigger
     const runStressTest = async () => {
+        setActionError('');
         try {
             const res = await apiPost('/api/stress', { isStressTesting: true });
-            if (res.ok) {
-                setIsStressTesting(true);
-            }
-        } catch (err) {
-            console.error("Error starting stress test:", err);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Could not start throughput test');
+            setIsStressTesting(true);
+        } catch (error) {
+            setActionError(error.message);
         }
     };
 
-    // Logout handler
-    const handleLogout = async () => {
-        await supabase.auth.signOut();
+    const selectView = (nextView) => {
+        setView(nextView);
+        setIsMobileMenuOpen(false);
+        setActionError('');
     };
 
-    // Chart.js initialization
-    useEffect(() => {
-        if (chartRef.current && !isStressTesting && tpsData.length > 0) {
-            if (chartInstance.current) {
-                chartInstance.current.destroy();
-            }
+    const renderNav = () => (
+        <nav className="primary-nav" aria-label="Primary navigation">
+            {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+                <button
+                    type="button"
+                    key={id}
+                    className={view === id ? 'primary-nav__item primary-nav__item--active' : 'primary-nav__item'}
+                    onClick={() => selectView(id)}
+                    aria-current={view === id ? 'page' : undefined}
+                >
+                    <Icon aria-hidden="true" />
+                    <span>{label}</span>
+                </button>
+            ))}
+        </nav>
+    );
 
-            const ctx = chartRef.current.getContext('2d');
-            chartInstance.current = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: tpsData.map(d => d.time),
-                    datasets: [{
-                        label: 'Throughput (TPS)',
-                        data: tpsData.map(d => d.tps),
-                        borderColor: '#ffffff',
-                        borderWidth: 1.5,
-                        pointBackgroundColor: '#ffffff',
-                        pointBorderColor: '#000000',
-                        pointBorderWidth: 1.5,
-                        pointRadius: 3,
-                        pointHoverRadius: 5,
-                        fill: true,
-                        backgroundColor: 'rgba(255, 255, 255, 0.02)',
-                        tension: 0.3
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            backgroundColor: '#0a0a0a',
-                            titleColor: '#ffffff',
-                            bodyColor: '#ffffff',
-                            borderColor: '#1e1e1e',
-                            borderWidth: 1,
-                            cornerRadius: 0,
-                            padding: 8,
-                            displayColors: false,
-                            titleFont: {
-                                family: 'Inter',
-                                size: 10,
-                                weight: 'bold'
-                            },
-                            bodyFont: {
-                                family: 'Inter',
-                                size: 11
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            grid: {
-                                color: '#121212',
-                                drawBorder: false
-                            },
-                            ticks: {
-                                color: '#525252',
-                                font: {
-                                    family: 'Inter',
-                                    size: 9,
-                                    weight: 'bold'
-                                }
-                            }
-                        },
-                        y: {
-                            grid: {
-                                color: '#121212',
-                                drawBorder: false
-                            },
-                            ticks: {
-                                color: '#525252',
-                                font: {
-                                    family: 'Inter',
-                                    size: 9,
-                                    weight: 'bold'
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        return () => {
-            if (chartInstance.current) {
-                chartInstance.current.destroy();
-            }
-        };
-    }, [tpsData, isStressTesting]);
-
-    const renderStatCard = (title, icon, value) => {
-        if (isStressTesting) {
-            return (
-                <div className="bg-[#0a0a0a] border border-[#1e1e1e] p-5 flex flex-col justify-between h-32 transition-luxury">
-                    <div className="flex justify-between items-start">
-                        <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">{title}</span>
-                        {icon}
-                    </div>
-                    <div className="h-6 w-2/3 skeleton-pulse"></div>
-                </div>
-            );
-        }
+    const renderDeviceRows = (limit) => {
+        const rows = typeof limit === 'number' ? devices.slice(0, limit) : devices;
+        if (!rows.length) return <EmptyState icon={Cpu} title="No devices registered" detail="Register a device to establish its ledger identity." />;
         return (
-            <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] p-5 flex flex-col justify-between h-32 transition-luxury">
-                <div className="flex justify-between items-start">
-                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">{title}</span>
-                    {icon}
-                </div>
-                <div className="text-2xl font-black tracking-tighter text-white uppercase">{value}</div>
+            <div className={`device-list ${typeof limit === 'number' ? '' : 'device-list--full'}`}>
+                {typeof limit !== 'number' && <div className="device-list__head"><span>Device</span><span>Public identity key</span><span>Status</span><span>Action</span></div>}
+                {rows.map((device) => (
+                    <div className="device-row" key={device.id}>
+                        <div className="device-row__identity">
+                            <span className={`presence-dot presence-dot--${device.status === 'ACTIVE' ? 'positive' : 'negative'}`} />
+                            <div><strong>{device.id}</strong><small>Ledger identity</small></div>
+                        </div>
+                        <code title={device.key}>{device.key}</code>
+                        <StatusBadge status={device.status} />
+                        {!limit && (
+                            <button
+                                type="button"
+                                className={device.status === 'ACTIVE' ? 'button button--danger-subtle button--small' : 'button button--secondary button--small'}
+                                onClick={() => toggleDeviceStatus(device.id)}
+                                disabled={deviceUpdating === device.id}
+                            >
+                                {deviceUpdating === device.id && <LoaderCircle className="spin" />}
+                                {device.status === 'ACTIVE' ? 'Revoke' : 'Activate'}
+                            </button>
+                        )}
+                    </div>
+                ))}
             </div>
         );
     };
 
+    const renderLogRows = (limit) => {
+        const rows = typeof limit === 'number' ? liveLogs.slice(0, limit) : liveLogs;
+        if (!rows.length && !logsLoading) return <tr className="empty-row"><td colSpan="7"><EmptyState icon={FileClock} title="No requests recorded" detail="Signed device requests will appear here as they arrive." /></td></tr>;
+        return rows.map((log) => (
+            <tr key={log.id}>
+                <td data-label="Request"><code title={log.id}>{log.id}</code></td>
+                <td data-label="Device"><strong>{log.deviceId}</strong></td>
+                <td data-label="Endpoint"><code>{log.endpoint}</code></td>
+                <td data-label="Route"><span className="route-label">{log.route}</span></td>
+                <td data-label="Decision"><StatusBadge status={log.status} /></td>
+                <td data-label="Signature"><code>{log.hash}</code></td>
+                {!limit && <td data-label="Recorded"><time>{log.createdAt ? new Date(log.createdAt).toLocaleString() : 'Current session'}</time></td>}
+            </tr>
+        ));
+    };
+
     return (
-        <div className="min-h-screen bg-black text-neutral-100 flex flex-col md:flex-row font-sans">
-            {/* Desktop Fixed Sidebar Navigation */}
-            <aside className="hidden md:flex md:w-64 h-screen fixed top-0 left-0 bg-[#0a0a0a] border-r border-[#1e1e1e] p-6 flex-col z-30 justify-between">
-                <div>
-                    <div className="flex items-center gap-3 mb-8">
-                        <div className="w-7 h-7 border border-white flex items-center justify-center text-white font-black text-xs">
-                            G
-                        </div>
+        <div className="app-shell">
+            <aside className="sidebar" inert={hasOpenModal ? '' : undefined}>
+                <Brand />
+                {renderNav()}
+                <div className="sidebar__route">
+                    <span className="section-label">Request routing</span>
+                    <RouteRail
+                        activeRoute={activeRoute}
+                        activeBackend={activeBackend}
+                        enabledRoutes={enabledRoutes}
+                        switching={routeSwitching}
+                        onSwitch={switchRoute}
+                    />
+                </div>
+                <footer className="sidebar__footer">
+                    <div className="connection-state">
+                        <span className={`presence-dot presence-dot--${gatewayError ? 'negative' : isLiveLedger ? 'positive' : 'warning'}`} />
                         <div>
-                            <div className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase font-sans font-bold">SYSTEM GATEWAY</div>
-                            <div className="text-white font-black tracking-tighter text-sm">IAM // DUAL-LEDGER</div>
+                            <strong>{gatewayError ? 'Gateway offline' : isFallback ? 'Fallback active' : isLiveLedger ? 'Ledger connected' : `${activeBackend} mode`}</strong>
+                            <span>{gatewayError ? 'Connection retrying' : isFallback ? `${activeRoute} unavailable` : `${activeBackend} is authoritative`}</span>
                         </div>
                     </div>
-
-                    <nav className="flex flex-col gap-4">
-                        <button
-                            onClick={() => setView('overview')}
-                            className={`text-left text-xs font-bold tracking-[0.2em] uppercase transition-luxury py-1.5 border-b ${view === 'overview' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                        >
-                            OVERVIEW
-                        </button>
-                        <button
-                            onClick={() => setView('devices')}
-                            className={`text-left text-xs font-bold tracking-[0.2em] uppercase transition-luxury py-1.5 border-b ${view === 'devices' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                        >
-                            DEVICES
-                        </button>
-                        <button
-                            onClick={() => setView('logs')}
-                            className={`text-left text-xs font-bold tracking-[0.2em] uppercase transition-luxury py-1.5 border-b ${view === 'logs' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                        >
-                            TRAFFIC
-                        </button>
-                    </nav>
-
-                    <div className="mt-8">
-                        <div className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-2">ACTIVE ROUTE</div>
-                        <div className="flex flex-col gap-1.5">
-                            <button
-                                onClick={() => switchRoute('FABRIC')}
-                                disabled={!enabledRoutes.includes('FABRIC')}
-                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : enabledRoutes.includes('FABRIC') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
-                            >
-                                <span>FABRIC</span>
-                                <Database className="w-3 h-3" />
-                            </button>
-                            <button
-                                onClick={() => switchRoute('IOTA')}
-                                disabled={!enabledRoutes.includes('IOTA')}
-                                className={`w-full py-2 px-3 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : enabledRoutes.includes('IOTA') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
-                            >
-                                <span>IOTA TANGLE</span>
-                                <Zap className="w-3 h-3" />
-                            </button>
-                        </div>
-                        {routeError && <div className="mt-2 text-[8px] font-mono text-rose-500">{routeError}</div>}
-                    </div>
-                </div>
-
-                <div className="border-t border-[#1e1e1e] pt-4">
-                    <div className="flex items-center gap-2 mb-1">
-                        <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : isFallback ? 'bg-amber-500' : activeBackend === 'POSTGRES' ? 'bg-emerald-500' : 'bg-amber-500'} animate-ping`}></span>
-                        <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-400 uppercase ml-1">{isLiveLedger ? 'LIVE LEDGER' : isFallback ? 'LEDGER FALLBACK' : activeBackend === 'POSTGRES' ? 'POSTGRES ACTIVE' : 'MEMORY MODE'}</span>
-                    </div>
-                    {isLiveLedger && (
-                        <div className="text-[8px] font-mono text-emerald-500/70">{liveBackendName}: CONNECTED</div>
-                    )}
-                    {!isLiveLedger && !isFallback && (
-                        <div className="text-[8px] font-mono text-amber-500/70">{liveBackendName}: ACTIVE</div>
-                    )}
-                    {ledgerError && (
-                        <div className="text-[8px] font-mono text-rose-500/70">FALLBACK: {ledgerError.slice(0, 40)}</div>
-                    )}
-                    <div className="text-[8px] font-mono text-neutral-600 mt-1">v4.1.2-alpha</div>
-                    <button
-                        onClick={handleLogout}
-                        className="mt-4 w-full py-2 px-3 text-[9px] font-bold tracking-[0.2em] uppercase flex items-center justify-between border border-[#1e1e1e] text-neutral-400 hover:text-white hover:border-neutral-500 transition-luxury"
-                    >
-                        <span>LOG OUT</span>
-                        <LogOut className="w-3 h-3" />
+                    <button className="button button--quiet button--full" type="button" onClick={() => supabase.auth.signOut()}>
+                        <LogOut /> Sign out
                     </button>
-                </div>
+                </footer>
             </aside>
 
-            {/* Mobile Header */}
-            <header className="md:hidden flex justify-between items-center bg-[#0a0a0a] border-b border-[#1e1e1e] p-4 sticky top-0 z-40">
-                <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 border border-white flex items-center justify-center text-white font-black text-xs">
-                        G
-                    </div>
-                    <span className="text-white font-black tracking-tighter text-xs uppercase">IAM GATEWAY</span>
-                </div>
-                <button
-                    onClick={() => setIsMobileMenuOpen(true)}
-                    className="p-1.5 border border-[#1e1e1e] hover:border-[#333333] transition-luxury bg-[#0a0a0a] text-white"
-                >
-                    <Menu className="w-3.5 h-3.5" />
+            <header className="mobile-header" inert={isMobileMenuOpen || hasOpenModal ? '' : undefined}>
+                <Brand compact />
+                <button className="icon-button" type="button" onClick={() => setIsMobileMenuOpen(true)} aria-label="Open navigation">
+                    <Menu />
                 </button>
             </header>
 
-            {/* Mobile Drawer Overlay */}
             {isMobileMenuOpen && (
-                <div className="fixed inset-0 z-50 bg-black/98 backdrop-blur-md flex flex-col p-8 md:hidden transition-luxury">
-                    <div className="flex justify-between items-center mb-10">
-                        <div className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">SYSTEM MENU</div>
-                        <button
-                            onClick={() => setIsMobileMenuOpen(false)}
-                            className="p-1.5 border border-[#1e1e1e] bg-[#0a0a0a] text-white hover:border-[#333333] transition-luxury"
-                        >
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                    </div>
-                    <div className="flex flex-col h-full justify-between">
-                        <div className="space-y-8">
-                            <nav className="flex flex-col gap-4">
-                                <button
-                                    onClick={() => { setView('overview'); setIsMobileMenuOpen(false); }}
-                                    className={`text-left text-xs font-bold tracking-[0.2em] uppercase py-1.5 border-b ${view === 'overview' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                                >
-                                    OVERVIEW
-                                </button>
-                                <button
-                                    onClick={() => { setView('devices'); setIsMobileMenuOpen(false); }}
-                                    className={`text-left text-xs font-bold tracking-[0.2em] uppercase py-1.5 border-b ${view === 'devices' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                                >
-                                    DEVICES
-                                </button>
-                                <button
-                                    onClick={() => { setView('logs'); setIsMobileMenuOpen(false); }}
-                                    className={`text-left text-xs font-bold tracking-[0.2em] uppercase py-1.5 border-b ${view === 'logs' ? 'text-white border-white' : 'text-neutral-500 border-transparent hover:text-neutral-300'}`}
-                                >
-                                    TRAFFIC
-                                </button>
-                            </nav>
-                            <div>
-                                <div className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-3">ACTIVE ROUTE</div>
-                                <div className="flex gap-2">
-                                    <button
-                                        onClick={() => { switchRoute('FABRIC'); setIsMobileMenuOpen(false); }}
-                                        disabled={!enabledRoutes.includes('FABRIC')}
-                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'FABRIC' ? 'bg-white text-black border-white' : enabledRoutes.includes('FABRIC') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
-                                    >
-                                        <span>FABRIC</span>
-                                        <Database className="w-3 h-3" />
-                                    </button>
-                                    <button
-                                        onClick={() => { switchRoute('IOTA'); setIsMobileMenuOpen(false); }}
-                                        disabled={!enabledRoutes.includes('IOTA')}
-                                        className={`flex-1 py-2 px-3 text-xs font-bold tracking-[0.2em] uppercase flex items-center justify-between border ${activeRoute === 'IOTA' ? 'bg-white text-black border-white' : enabledRoutes.includes('IOTA') ? 'bg-transparent text-neutral-400 border-[#1e1e1e] hover:border-neutral-500 hover:text-white' : 'bg-transparent text-neutral-700 border-[#161616] cursor-not-allowed'}`}
-                                    >
-                                        <span>IOTA</span>
-                                        <Zap className="w-3 h-3" />
-                                    </button>
-                                </div>
-                            </div>
+                <div className="mobile-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setIsMobileMenuOpen(false)}>
+                    <aside className="mobile-drawer" role="dialog" aria-modal="true" aria-label="Navigation menu">
+                        <div className="mobile-drawer__header"><Brand /><button className="icon-button" type="button" onClick={() => setIsMobileMenuOpen(false)} aria-label="Close navigation" autoFocus><X /></button></div>
+                        {renderNav()}
+                        <div className="mobile-drawer__route">
+                            <span className="section-label">Request routing</span>
+                            <RouteRail activeRoute={activeRoute} activeBackend={activeBackend} enabledRoutes={enabledRoutes} switching={routeSwitching} onSwitch={(route) => { switchRoute(route); setIsMobileMenuOpen(false); }} />
                         </div>
-                        <div className="border-t border-[#1e1e1e] pt-4 mt-6">
-                            <div className="flex items-center gap-2">
-                                <span className={`w-1.5 h-1.5 rounded-full ${isLiveLedger ? 'bg-emerald-500' : isFallback ? 'bg-amber-500' : activeBackend === 'POSTGRES' ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">{isLiveLedger ? 'LIVE LEDGER' : isFallback ? 'LEDGER FALLBACK' : activeBackend === 'POSTGRES' ? 'POSTGRES ACTIVE' : 'MEMORY MODE'}</span>
-                            </div>
-                            {ledgerError && (
-                                <div className="text-[8px] font-mono text-rose-500/70 mt-1">FALLBACK: {ledgerError.slice(0, 40)}</div>
-                            )}
-                            <button
-                                onClick={() => { handleLogout(); setIsMobileMenuOpen(false); }}
-                                className="mt-4 w-full py-2 px-3 text-[9px] font-bold tracking-[0.2em] uppercase flex items-center justify-between border border-[#1e1e1e] text-neutral-400 hover:text-white hover:border-neutral-500 transition-luxury"
-                            >
-                                <span>LOG OUT</span>
-                                <LogOut className="w-3 h-3" />
-                            </button>
-                        </div>
-                    </div>
+                        <button className="button button--secondary button--full" type="button" onClick={() => supabase.auth.signOut()}><LogOut /> Sign out</button>
+                    </aside>
                 </div>
             )}
 
-            {/* Main Content Area */}
-            <main className="flex-1 md:ml-64 bg-black min-h-screen p-6 md:p-10 overflow-y-auto">
-                {view === 'overview' && (
+            <main className="main-content" inert={isMobileMenuOpen || hasOpenModal ? '' : undefined}>
+                <header className="page-header">
                     <div>
-                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-                            <div>
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">CONSOLE // OVERVIEW</span>
-                                <h1 className="text-2xl md:text-3xl font-black tracking-tighter text-white uppercase mt-1">
-                                    SYSTEM DASHBOARD
-                                </h1>
-                            </div>
-                            <div>
-                                <button
-                                    onClick={runStressTest}
-                                    disabled={isStressTesting}
-                                    className={`py-2.5 px-5 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center gap-2 border rounded-full ${isStressTesting ? 'bg-transparent text-neutral-600 border-[#1e1e1e] cursor-not-allowed' : 'bg-white text-black border-white hover:bg-black hover:text-white hover:border-white'}`}
-                                >
-                                    <Play className="w-3 h-3 fill-current" />
-                                    {isStressTesting ? 'TESTING...' : 'RUN STRESS TEST (UC5)'}
-                                </button>
-                            </div>
-                        </div>
+                        <span className="eyebrow">Identity access management</span>
+                        <h1>{currentView?.label}</h1>
+                        <p>{view === 'overview' ? 'Monitor trust decisions across your connected ledgers.' : view === 'devices' ? 'Manage registered identities and their access state.' : 'Review durable access decisions and routing history.'}</p>
+                    </div>
+                    {view === 'overview' && (
+                        <button className="button button--primary" type="button" onClick={runStressTest} disabled={isStressTesting}>
+                            {isStressTesting ? <LoaderCircle className="spin" /> : <Play />}
+                            {isStressTesting ? 'Test running' : 'Run throughput test'}
+                        </button>
+                    )}
+                    {view === 'devices' && (
+                        <button className="button button--primary" type="button" onClick={() => setIsAddDeviceModalOpen(true)}>
+                            <Plus /> Register device
+                        </button>
+                    )}
+                    {view === 'logs' && (
+                        <button className="button button--secondary" type="button" onClick={() => fetchAuditLogs()} disabled={logsLoading}>
+                            <RefreshCw className={logsLoading ? 'spin' : ''} /> Refresh
+                        </button>
+                    )}
+                </header>
 
-                        {/* Ledger Backend Status Banner */}
-                        {!isLiveLedger && (
-                            <div className={`mb-8 p-4 border flex items-center justify-between gap-4 ${ledgerError ? 'border-rose-950 bg-rose-950/10' : 'border-amber-950 bg-amber-950/10'}`}>
-                                <div className="flex items-center gap-3">
-                                    <Database className={`w-4 h-4 flex-shrink-0 ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`} />
-                                    <div>
-                                        <div className={`text-[8px] font-bold tracking-[0.2em] uppercase ${ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
-                                            {isFallback ? 'LEDGER FALLBACK ACTIVE' : `${activeBackend} BACKEND ACTIVE`}
-                                        </div>
-                                        <div className="text-xs font-bold text-white tracking-tight uppercase mt-0.5">
-                                            {isFallback
-                                                ? `${activeRoute} UNREACHABLE — USING ${activeBackend}`
-                                                : `NO DISTRIBUTED LEDGER ENABLED — USING ${activeBackend}`}
-                                        </div>
-                                        {ledgerError && (
-                                            <div className="text-[9px] font-mono text-neutral-500 mt-1">REASON: {ledgerError}</div>
-                                        )}
+                {(gatewayError || actionError) && (
+                    <div className="notice notice--error" role="alert">
+                        <AlertCircle />
+                        <div><strong>{gatewayError ? 'Gateway connection lost' : 'Action could not be completed'}</strong><span>{gatewayError || actionError}</span></div>
+                        {actionError && <button className="icon-button" type="button" onClick={() => setActionError('')} aria-label="Dismiss error"><X /></button>}
+                    </div>
+                )}
+
+                {!gatewayError && (!isLiveLedger || ledgerError) && (
+                    <div className={`notice ${ledgerError ? 'notice--error' : 'notice--warning'}`} role="status">
+                        <AlertCircle />
+                        <div>
+                            <strong>{isFallback ? `${activeRoute} unavailable, using ${activeBackend}` : `Running in ${activeBackend} mode`}</strong>
+                            <span>{ledgerError || 'Enable Fabric or IOTA on the gateway to use a distributed ledger.'}</span>
+                        </div>
+                    </div>
+                )}
+
+                {view === 'overview' && (
+                    <div className="view-stack view-enter">
+                        <section className="metrics-grid" aria-label="System metrics">
+                            <article className="metric-card"><Server /><span>Authoritative backend</span><strong>{activeBackend === 'IOTA' ? 'IOTA Tangle' : activeBackend}</strong><small>{isFallback ? `${activeRoute} selected; fallback active` : 'Serving identity reads'}</small></article>
+                            <article className="metric-card"><CircleGauge /><span>Peak throughput</span><strong>{peakTps} <em>TPS</em></strong><small>Current observation window</small></article>
+                            <article className="metric-card"><ShieldCheck /><span>Active identities</span><strong>{activeDevices} <em>of {devices.length}</em></strong><small>{devices.length - activeDevices} currently revoked</small></article>
+                        </section>
+
+                        <section className="panel throughput-panel">
+                            <header className="panel__header">
+                                <div><span className="section-label">Throughput</span><h2>Request activity</h2></div>
+                                <div className="live-indicator"><span className="presence-dot presence-dot--positive" /> Live TPS</div>
+                            </header>
+                            <div className="chart-wrap">
+                                {isStressTesting ? <div className="loading-block"><LoaderCircle className="spin" /><span>Measuring incoming traffic</span></div> : tpsData.length ? <canvas ref={chartRef} role="img" aria-label="Requests per second over time" /> : <EmptyState icon={Activity} title="No throughput data" detail="Traffic measurements will appear when requests arrive." />}
+                            </div>
+                        </section>
+
+                        <div className="overview-grid">
+                            <section className="panel compact-panel">
+                                <header className="panel__header"><div><span className="section-label">Registry</span><h2>Device identities</h2></div><button className="text-button" type="button" onClick={() => selectView('devices')}>View all <ArrowRight /></button></header>
+                                {renderDeviceRows(3)}
+                            </section>
+                            <section className="panel compact-panel">
+                                <header className="panel__header"><div><span className="section-label">Audit trail</span><h2>Recent decisions</h2></div><button className="text-button" type="button" onClick={() => selectView('logs')}>View log <ArrowRight /></button></header>
+                                {liveLogs.length ? (
+                                    <div className="recent-list">
+                                        {liveLogs.slice(0, 3).map((log) => (
+                                            <div className="recent-row" key={log.id}>
+                                                <div><strong>{log.deviceId}</strong><small title={log.id}>{log.endpoint} · {log.id}</small></div>
+                                                <div className="recent-row__meta"><span className="route-label">{log.route}</span><StatusBadge status={log.status} /></div>
+                                            </div>
+                                        ))}
                                     </div>
-                                </div>
-                                {!ledgerError && (
-                                    <span className="text-[8px] font-bold tracking-[0.2em] text-neutral-500 uppercase whitespace-nowrap">
-                                        SET FABRIC_ENABLED=true OR IOTA_ENABLED=true ON GATEWAY
-                                    </span>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Stat Cards — production: live values only, no hardcoded demo */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-                            {renderStatCard("01 // Active Backend", <Server className="w-3.5 h-3.5 text-neutral-400" />, isFallback ? `${activeBackend} // ${activeRoute} SELECTED` : activeBackend)}
-                            {renderStatCard("02 // Live TPS (PEAK)", <Activity className="w-3.5 h-3.5 text-neutral-400" />, tpsData.length ? `${Math.max(...tpsData.map(d => d.tps))} TPS` : "0 TPS")}
-                            {renderStatCard(
-                                "03 // Live Devices",
-                                <Cpu className="w-3.5 h-3.5 text-neutral-400" />,
-                                devices.length > 0 ? `${devices.filter(d => d.status === 'ACTIVE').length} / ${devices.length}` : "0 / 0"
-                            )}
-                        </div>
-
-                        {/* Chart Section */}
-                        <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-6 mb-8">
-                            <div className="flex justify-between items-center mb-6">
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">04 // THROUGHPUT ANALYSIS</span>
-                                <div className="flex items-center gap-1.5">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-white"></span>
-                                    <span className="text-[10px] font-bold tracking-[0.2em] text-white uppercase">LIVE TPS</span>
-                                </div>
-                            </div>
-                            <div className="h-48 w-full relative">
-                                {isStressTesting ? (
-                                    <div className="absolute inset-0 skeleton-pulse"></div>
+                                ) : logsLoading ? (
+                                    <div className="loading-row"><LoaderCircle className="spin" /> Loading recent decisions</div>
                                 ) : (
-                                    <canvas ref={chartRef}></canvas>
+                                    <EmptyState icon={FileClock} title="No requests recorded" detail="Signed device requests will appear here as they arrive." />
                                 )}
-                            </div>
-                        </div>
-
-                        {/* Split Previews */}
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                            {/* Device Preview */}
-                            <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-6 flex flex-col justify-between min-h-[220px]">
-                                <div>
-                                    <div className="flex justify-between items-center mb-4">
-                                        <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">05 // DEVICE REGISTRY</span>
-                                        <button
-                                            onClick={() => setView('devices')}
-                                            className="text-[10px] font-bold tracking-[0.2em] text-white uppercase hover:text-neutral-400 flex items-center gap-1 transition-luxury"
-                                        >
-                                            VIEW ALL <ArrowRight className="w-3 h-3" />
-                                        </button>
-                                    </div>
-                                    {isStressTesting ? (
-                                        <div className="space-y-3">
-                                            <div className="h-10 skeleton-pulse"></div>
-                                            <div className="h-10 skeleton-pulse"></div>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-2">
-                                            {devices.slice(0, 3).map(device => (
-                                                <div key={device.id} className="flex justify-between items-center py-2.5 border-b border-[#121212] last:border-b-0">
-                                                    <div>
-                                                        <div className="text-xs font-bold text-white tracking-tight">{device.id}</div>
-                                                        <div className="text-[9px] font-mono text-neutral-500 mt-0.5">{device.key}</div>
-                                                    </div>
-                                                    <span className={`px-2 py-0.5 text-[8px] font-bold tracking-[0.15em] border uppercase ${device.status === 'ACTIVE'
-                                                            ? 'text-emerald-400 border-emerald-950 bg-emerald-950/20'
-                                                            : 'text-rose-400 border-rose-950 bg-rose-950/20'
-                                                        }`}>
-                                                        {device.status}
-                                                    </span>
-                                                </div>
-                                            ))}
-                                            {devices.length === 0 && (
-                                                <div className="text-xs text-neutral-500 py-4 text-center uppercase tracking-wider">NO DEVICES SYNCED</div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            {/* Logs Preview */}
-                            <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-6 flex flex-col justify-between min-h-[220px]">
-                                <div>
-                                    <div className="flex justify-between items-center mb-4">
-                                        <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">06 // SECURITY AUDIT TRAIL</span>
-                                        <button
-                                            onClick={() => setView('logs')}
-                                            className="text-[10px] font-bold tracking-[0.2em] text-white uppercase hover:text-neutral-400 flex items-center gap-1 transition-luxury"
-                                        >
-                                            VIEW LOGS <ArrowRight className="w-3 h-3" />
-                                        </button>
-                                    </div>
-                                    {isStressTesting ? (
-                                        <div className="space-y-3">
-                                            <div className="h-10 skeleton-pulse"></div>
-                                            <div className="h-10 skeleton-pulse"></div>
-                                        </div>
-                                    ) : (
-                                        <div className="space-y-2">
-                                            {liveLogs.slice(0, 3).map(log => (
-                                                <div key={log.id} className="flex justify-between items-center py-2.5 border-b border-[#121212] last:border-b-0">
-                                                    <div>
-                                                        <div className="text-xs font-bold text-white tracking-tight">{log.id} // {log.deviceId}</div>
-                                                        <div className="text-[9px] font-mono text-neutral-500 mt-0.5">{log.hash}</div>
-                                                    </div>
-                                                    <div className="flex items-center gap-3">
-                                                        <span className="text-[8px] font-mono text-neutral-400">{log.route}</span>
-                                                        <span className={`px-2 py-0.5 text-[8px] font-bold tracking-[0.15em] border uppercase ${log.status === 'GRANTED'
-                                                                ? 'text-emerald-400 border-emerald-950 bg-emerald-950/20'
-                                                                : log.status === 'REVOKED'
-                                                                    ? 'text-rose-400 border-rose-950 bg-rose-950/20'
-                                                                    : 'text-amber-400 border-amber-950 bg-amber-950/20'
-                                                            }`}>
-                                                            {log.status}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                            {liveLogs.length === 0 && (
-                                                <div className="text-xs text-neutral-500 py-4 text-center uppercase tracking-wider">AWAITING REQUEST STREAM</div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
+                            </section>
                         </div>
                     </div>
                 )}
 
                 {view === 'devices' && (
-                    <div>
-                        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-                            <div>
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">CONSOLE // MANAGEMENT</span>
-                                <h1 className="text-2xl md:text-3xl font-black tracking-tighter text-white uppercase mt-1">
-                                    DEVICE INVENTORY
-                                </h1>
-                            </div>
-                            <div>
-                                <button
-                                    onClick={() => setIsAddDeviceModalOpen(true)}
-                                    className="py-2.5 px-5 text-[10px] font-bold tracking-[0.2em] uppercase transition-luxury flex items-center gap-2 border border-white bg-white text-black hover:bg-black hover:text-white hover:border-white rounded-full"
-                                >
-                                    <PlusCircle className="w-3.5 h-3.5" />
-                                    REGISTER DEVICE
-                                </button>
-                            </div>
-                        </div>
-
-                        <div className="bg-[#0a0a0a] border border-[#1e1e1e] p-6">
-                            {isStressTesting ? (
-                                <div className="space-y-4">
-                                    <div className="h-12 skeleton-pulse"></div>
-                                    <div className="h-12 skeleton-pulse"></div>
-                                    <div className="h-12 skeleton-pulse"></div>
-                                </div>
-                            ) : (
-                                <div className="space-y-4 overflow-x-auto">
-                                    <div className="min-w-[650px]">
-                                        <div className="grid grid-cols-12 text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase pb-4 border-b border-[#1e1e1e] mb-2">
-                                            <div className="col-span-3">Device ID</div>
-                                            <div className="col-span-5">Public Identity Key</div>
-                                            <div className="col-span-2">Security Status</div>
-                                            <div className="col-span-2 text-right">Actions</div>
-                                        </div>
-                                        {devices.map((device) => (
-                                            <div key={device.id} className="grid grid-cols-12 items-center py-3 border-b border-[#121212] last:border-b-0 hover:border-neutral-700 transition-luxury">
-                                                <div className="col-span-3 flex items-center gap-2">
-                                                    <div className="w-1.5 h-1.5 rounded-full bg-neutral-700"></div>
-                                                    <span className="text-xs font-bold text-white tracking-tight">{device.id}</span>
-                                                </div>
-                                                <div className="col-span-5 text-xs font-mono text-neutral-400">{device.key}</div>
-                                                <div className="col-span-2">
-                                                    <span className={`px-2.5 py-1 text-[8px] font-bold tracking-[0.15em] border uppercase ${device.status === 'ACTIVE'
-                                                            ? 'text-emerald-400 border-emerald-950 bg-emerald-950/20'
-                                                            : 'text-rose-400 border-rose-950 bg-rose-950/20'
-                                                        }`}>
-                                                        {device.status}
-                                                    </span>
-                                                </div>
-                                                <div className="col-span-2 text-right">
-                                                    <button
-                                                        onClick={() => toggleDeviceStatus(device.id)}
-                                                        className={`py-1.5 px-4 text-[8px] font-bold tracking-[0.2em] uppercase transition-luxury border rounded-full ${device.status === 'ACTIVE'
-                                                                ? 'bg-transparent text-rose-400 border-rose-950 hover:bg-rose-950/30'
-                                                                : 'bg-transparent text-emerald-400 border-emerald-950 hover:bg-emerald-950/30'
-                                                            }`}
-                                                    >
-                                                        {device.status === 'ACTIVE' ? 'REVOKE' : 'ACTIVATE'}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        ))}
-                                        {devices.length === 0 && (
-                                            <div className="text-xs text-neutral-500 py-8 text-center uppercase tracking-wider">NO DEVICES SYNCED</div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    </div>
+                    <section className="panel view-enter">
+                        <header className="panel__header panel__header--bordered">
+                            <div><span className="section-label">Ledger registry</span><h2>{devices.length} registered {devices.length === 1 ? 'identity' : 'identities'}</h2></div>
+                            <span className="panel__meta">Backend: {activeBackend}</span>
+                        </header>
+                        {renderDeviceRows()}
+                    </section>
                 )}
 
                 {view === 'logs' && (
-                    <div>
-                        <div className="mb-8">
-                            <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">CONSOLE // SECURITY RECORDS</span>
-                            <h1 className="text-2xl md:text-3xl font-black tracking-tighter text-white uppercase mt-1">
-                                TRAFFIC STREAM
-                            </h1>
+                    <section className="panel view-enter">
+                        <header className="panel__header panel__header--bordered">
+                            <div><span className="section-label">Durable audit trail</span><h2>{logTotal.toLocaleString()} recorded decisions</h2></div>
+                            <div className="panel__meta-group"><span>Selected: {activeRoute}</span><span>Backend: {activeBackend}</span></div>
+                        </header>
+                        {logsError && <div className="inline-error" role="alert"><AlertCircle /> {logsError}</div>}
+                        <div className="table-wrap">
+                            <table className="data-table data-table--logs">
+                                <thead><tr><th>Request ID</th><th>Device</th><th>Endpoint</th><th>Route</th><th>Decision</th><th>Signature</th><th>Recorded</th></tr></thead>
+                                <tbody>{renderLogRows()}</tbody>
+                            </table>
                         </div>
-
-                        <div className="bg-[#0a0a0a] border border-[#1e1e1e] p-6">
-                            <div className="mb-6 flex justify-between items-center">
-                                <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">07 // REAL-TIME IAM ROUTING LEDGER</span>
-                                <div className="flex items-center gap-4">
-                                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">{logTotal.toLocaleString()} RECORDS</span>
-                                    <button
-                                        onClick={() => fetchAuditLogs()}
-                                        disabled={logsLoading}
-                                        className="text-[10px] font-bold tracking-[0.2em] text-neutral-300 hover:text-white disabled:text-neutral-600 uppercase"
-                                    >
-                                        REFRESH
-                                    </button>
-                                    <span className="text-[10px] font-bold tracking-[0.2em] text-neutral-400 uppercase">SELECTED: {activeRoute}</span>
-                                    <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${isLiveLedger ? 'text-emerald-400' : ledgerError ? 'text-rose-400' : 'text-amber-400'}`}>
-                                        BACKEND: {liveBackendName}
-                                    </span>
-                                </div>
-                            </div>
-
-                            {isStressTesting ? (
-                                <div className="space-y-4">
-                                    <div className="h-10 skeleton-pulse"></div>
-                                    <div className="h-10 skeleton-pulse"></div>
-                                    <div className="h-10 skeleton-pulse"></div>
-                                    <div className="h-10 skeleton-pulse"></div>
-                                </div>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-left min-w-[900px]">
-                                        <thead>
-                                            <tr className="border-b border-[#1e1e1e] text-[10px] font-bold tracking-[0.2em] text-neutral-500 uppercase">
-                                                <th className="pb-4">Request ID</th>
-                                                <th className="pb-4">Device ID</th>
-                                                <th className="pb-4">Endpoint</th>
-                                                <th className="pb-4">Route Ledger</th>
-                                                <th className="pb-4">Status</th>
-                                                <th className="pb-4">Transaction Hash</th>
-                                                <th className="pb-4">Recorded At</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-[#121212]">
-                                            {liveLogs.map((log) => (
-                                                <tr key={log.id} className="group hover:bg-[#050505] transition-luxury">
-                                                    <td className="py-3 font-mono text-xs text-neutral-400">{log.id}</td>
-                                                    <td className="py-3 text-xs font-bold text-white tracking-tight">{log.deviceId}</td>
-                                                    <td className="py-3 text-xs font-mono text-neutral-400">{log.endpoint}</td>
-                                                    <td className="py-3 text-xs font-bold text-neutral-300">{log.route}</td>
-                                                    <td className="py-3">
-                                                        <span className={`px-2 py-0.5 text-[8px] font-bold tracking-[0.15em] border uppercase ${log.status === 'GRANTED'
-                                                                ? 'text-emerald-400 border-emerald-950 bg-emerald-950/20'
-                                                                : log.status === 'REVOKED'
-                                                                    ? 'text-rose-400 border-rose-950 bg-rose-950/20'
-                                                                    : 'text-amber-400 border-amber-950 bg-amber-950/20'
-                                                            }`}>
-                                                            {log.status}
-                                                        </span>
-                                                    </td>
-                                                    <td className="py-3 font-mono text-[10px] text-neutral-500 group-hover:text-neutral-300 transition-luxury">{log.hash}</td>
-                                                    <td className="py-3 font-mono text-[10px] text-neutral-500 whitespace-nowrap">{log.createdAt ? new Date(log.createdAt).toLocaleString() : 'CURRENT SESSION'}</td>
-                                                </tr>
-                                            ))}
-                                            {liveLogs.length === 0 && (
-                                                <tr>
-                                                    <td colSpan="7" className="text-xs text-neutral-500 py-8 text-center uppercase tracking-wider">{logsLoading ? 'LOADING AUDIT HISTORY' : 'NO AUDIT RECORDS'}</td>
-                                                </tr>
-                                            )}
-                                        </tbody>
-                                    </table>
-                                    {logsError && (
-                                        <div className="mt-5 text-xs text-rose-400 uppercase tracking-wider">{logsError}</div>
-                                    )}
-                                    {liveLogs.length < logTotal && (
-                                        <button
-                                            onClick={() => fetchAuditLogs(liveLogs.length)}
-                                            disabled={logsLoading}
-                                            className="mt-6 w-full border border-[#242424] py-3 text-[10px] font-bold tracking-[0.2em] text-neutral-400 hover:text-white hover:border-[#3a3a3a] disabled:text-neutral-600 uppercase transition-luxury"
-                                        >
-                                            {logsLoading ? 'LOADING' : `LOAD MORE (${liveLogs.length.toLocaleString()} / ${logTotal.toLocaleString()})`}
-                                        </button>
-                                    )}
-                                </div>
-                            )}
-                        </div>
-                    </div>
+                        {logsLoading && !liveLogs.length && <div className="loading-row"><LoaderCircle className="spin" /> Loading audit history</div>}
+                        {liveLogs.length < logTotal && (
+                            <div className="panel__footer"><button className="button button--secondary" type="button" onClick={() => fetchAuditLogs(liveLogs.length)} disabled={logsLoading}>{logsLoading && <LoaderCircle className="spin" />}Load more <span>{liveLogs.length.toLocaleString()} / {logTotal.toLocaleString()}</span></button></div>
+                        )}
+                    </section>
                 )}
             </main>
 
-            {/* Custom Modal: Add Device */}
             {isAddDeviceModalOpen && (
-                <div className="fixed inset-0 z-50 bg-black/98 backdrop-blur-md flex items-center justify-center p-4 transition-luxury">
-                    <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-6 max-w-sm w-full relative">
-                        <button
-                            onClick={() => setIsAddDeviceModalOpen(false)}
-                            className="absolute top-4 right-4 text-neutral-500 hover:text-white transition-luxury p-1 border border-[#1e1e1e] bg-black"
-                        >
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                        <div className="mb-6">
-                            <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">ADD NEW IDENTITY</span>
-                            <h3 className="text-lg font-black tracking-tighter text-white uppercase mt-1">REGISTER DEVICE</h3>
-                        </div>
-                        <form onSubmit={handleAddDevice} className="space-y-4">
-                            <div>
-                                <label className="block text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-1.5">Device ID</label>
-                                <input
-                                    type="text"
-                                    value={newDeviceId}
-                                    onChange={(e) => setNewDeviceId(e.target.value)}
-                                    placeholder="DEV_TEMP_04"
-                                    className="w-full bg-black border border-[#1e1e1e] text-white p-3 text-xs tracking-wider focus:outline-none focus:border-white transition-luxury uppercase"
-                                    required
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase mb-1.5">Public Key (PEM)</label>
-                                <textarea
-                                    value={newDeviceKey}
-                                    onChange={(e) => setNewDeviceKey(e.target.value)}
-                                    placeholder="-----BEGIN PUBLIC KEY-----&#10;MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...&#10;-----END PUBLIC KEY-----"
-                                    rows={3}
-                                    className="w-full bg-black border border-[#1e1e1e] text-white p-3 text-[10px] font-mono tracking-wider focus:outline-none focus:border-white transition-luxury"
-                                    required
-                                />
-                                <div className="text-[8px] font-mono text-neutral-600 mt-1">Paste full PEM from device provisioning (P-256). Simulator auto-registers via /api/devices/register.</div>
-                            </div>
-                            <div className="pt-4 flex gap-3">
-                                <button
-                                    type="button"
-                                    onClick={() => setIsAddDeviceModalOpen(false)}
-                                    className="flex-1 py-3 border border-[#1e1e1e] text-[10px] font-bold tracking-[0.2em] uppercase hover:bg-neutral-900 transition-luxury rounded-full"
-                                >
-                                    CANCEL
-                                </button>
-                                <button
-                                    type="submit"
-                                    className="flex-1 py-3 bg-white text-black text-[10px] font-bold tracking-[0.2em] uppercase hover:bg-black hover:text-white hover:border-white border border-transparent transition-luxury rounded-full"
-                                >
-                                    REGISTER
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
+                <Modal title="Register device" eyebrow="New ledger identity" onClose={() => !registering && setIsAddDeviceModalOpen(false)}>
+                    <form onSubmit={handleAddDevice} className="form-stack">
+                        <label className="field"><span>Device ID</span><input type="text" value={newDeviceId} onChange={(event) => setNewDeviceId(event.target.value)} placeholder="SmartLock_FrontDoor" minLength={3} maxLength={64} autoFocus required /><small>3–64 letters, numbers, underscores, or hyphens.</small></label>
+                        <label className="field"><span>Public key (P-256 PEM)</span><textarea value={newDeviceKey} onChange={(event) => setNewDeviceKey(event.target.value)} placeholder={'-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----'} rows={6} required /><small>Paste the complete SPKI public key created during provisioning.</small></label>
+                        {actionError && <div className="inline-error" role="alert"><AlertCircle /> {actionError}</div>}
+                        <div className="modal__actions"><button className="button button--secondary" type="button" onClick={() => setIsAddDeviceModalOpen(false)} disabled={registering}>Cancel</button><button className="button button--primary" type="submit" disabled={registering}>{registering && <LoaderCircle className="spin" />}{registering ? 'Registering' : 'Register device'}</button></div>
+                    </form>
+                </Modal>
             )}
 
-            {/* Custom Modal: Stress Test Complete Report */}
             {isStressModalOpen && stressReport && (
-                <div className="fixed inset-0 z-50 bg-black/98 backdrop-blur-md flex items-center justify-center p-4 transition-luxury">
-                    <div className="bg-[#0a0a0a] border border-[#1e1e1e] hover:border-[#333333] transition-luxury p-8 max-w-lg w-full relative">
-                        <button
-                            onClick={() => setIsStressModalOpen(false)}
-                            className="absolute top-4 right-4 text-neutral-500 hover:text-white transition-luxury p-1 border border-[#1e1e1e] bg-black"
-                        >
-                            <X className="w-3.5 h-3.5" />
-                        </button>
-                        <div className="mb-6">
-                            <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">UC5 // PERFORMANCE REPORT</span>
-                            <h3 className="text-xl font-black tracking-tighter text-white uppercase mt-1">STRESS TEST COMPLETE</h3>
-                        </div>
-
-                        <div className="space-y-4 mb-6">
-                            <div className="p-4 border border-emerald-950 bg-emerald-950/10 text-emerald-400 flex items-center gap-2">
-                                <ShieldCheck className="w-4 h-4 flex-shrink-0" />
-                                <div>
-                                     <div className="text-[8px] font-bold tracking-[0.2em] uppercase">SYSTEM LEVEL</div>
-                                     <div className="text-xs font-bold font-mono">
-                                         {stressReport.totalRequests > 0
-                                             ? `${stressReport.totalRequests} REQUESTS MEASURED OVER ${(stressReport.durationMs / 1000).toFixed(2)}S`
-                                             : 'NO /API/ACCESS TRAFFIC OBSERVED'}
-                                     </div>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="border border-[#1e1e1e] p-4">
-                                     <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">PEAK THROUGHPUT</span>
-                                     <div className="text-lg font-bold text-white mt-1">{stressReport.peakTps} TPS</div>
-                                </div>
-                                <div className="border border-[#1e1e1e] p-4">
-                                     <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">2XX RESPONSE RATE</span>
-                                     <div className="text-lg font-bold text-white mt-1">{stressReport.successRate.toFixed(2)}%</div>
-                                </div>
-                            </div>
-
-                            <div className="border border-[#1e1e1e] p-4 space-y-2">
-                                <span className="text-[9px] font-bold tracking-[0.2em] text-neutral-500 uppercase">MEASURED METRICS</span>
-                                <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">AVERAGE THROUGHPUT:</span>
-                                    <span className="text-white">{stressReport.averageTps.toFixed(2)} TPS</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">AVERAGE LATENCY:</span>
-                                    <span className="text-white">{stressReport.averageLatencyMs.toFixed(2)} MS</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">P95 LATENCY:</span>
-                                    <span className="text-white">{stressReport.p95LatencyMs.toFixed(2)} MS</span>
-                                </div>
-                                <div className="flex justify-between text-xs font-mono">
-                                    <span className="text-neutral-400">RESPONSES:</span>
-                                    <span className="text-white">{stressReport.successfulRequests} 2XX / {stressReport.failedRequests} NON-2XX</span>
-                                </div>
-                                {stressReport.routes.map(route => (
-                                    <div key={route.route} className="flex justify-between text-xs font-mono">
-                                        <span className="text-neutral-400">{route.route}:</span>
-                                        <span className="text-white">{route.requests} REQ / {route.averageLatencyMs.toFixed(2)} MS AVG</span>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        <button
-                            onClick={() => setIsStressModalOpen(false)}
-                            className="w-full py-3 bg-white text-black text-[10px] font-bold tracking-[0.2em] uppercase hover:bg-black hover:text-white hover:border-white border border-transparent transition-luxury rounded-full"
-                        >
-                            CLOSE REPORT
-                        </button>
-                    </div>
-                </div>
+                <Modal title="Throughput report" eyebrow="Measurement complete" onClose={() => setIsStressModalOpen(false)} size="wide">
+                    <div className="report-summary"><ShieldCheck /><div><strong>{stressReport.totalRequests} requests measured</strong><span>Observation window: {(stressReport.durationMs / 1000).toFixed(2)} seconds</span></div></div>
+                    <div className="report-grid"><article><span>Peak throughput</span><strong>{stressReport.peakTps} TPS</strong></article><article><span>2xx response rate</span><strong>{stressReport.successRate.toFixed(2)}%</strong></article><article><span>Average latency</span><strong>{stressReport.averageLatencyMs.toFixed(2)} ms</strong></article><article><span>P95 latency</span><strong>{stressReport.p95LatencyMs.toFixed(2)} ms</strong></article></div>
+                    <div className="report-detail"><div><span>Successful requests</span><strong>{stressReport.successfulRequests}</strong></div><div><span>Non-2xx responses</span><strong>{stressReport.failedRequests}</strong></div>{stressReport.routes.map((route) => <div key={route.route}><span>{route.route}</span><strong>{route.requests} requests · {route.averageLatencyMs.toFixed(2)} ms avg</strong></div>)}</div>
+                    <div className="modal__actions"><button className="button button--primary" type="button" onClick={() => setIsStressModalOpen(false)}>Close report</button></div>
+                </Modal>
             )}
         </div>
     );
