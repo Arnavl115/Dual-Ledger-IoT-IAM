@@ -26,11 +26,12 @@ except ImportError:
     print("Please install it by running: pip install cryptography")
     exit(1)
 
+SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 GATEWAY_BASE_URL = os.environ.get("GATEWAY_BASE_URL", "http://localhost:3000").rstrip("/")
 GATEWAY_URL = f"{GATEWAY_BASE_URL}/api/access"
 DEVICES_URL = f"{GATEWAY_BASE_URL}/api/devices"
 REGISTER_URL = f"{GATEWAY_BASE_URL}/api/devices/register"
-KEY_FILE = os.environ.get("SIMULATOR_KEY_FILE", "ecdsa_keys.json")
+KEY_FILE = os.environ.get("SIMULATOR_KEY_FILE", os.path.join(SCRIPT_DIRECTORY, "ecdsa_keys.json"))
 
 DEFAULT_DEVICES = ["SmartLock_FrontDoor", "ServerRack_A", "BioLab_Fridge", "Secure_Gateway_B"]
 ACTIONS = ["unlock", "lock", "ping_status"]
@@ -41,24 +42,8 @@ def load_keys():
             return json.load(f)
     return {}
 
-def save_keys(keys):
-    temp_file = f"{KEY_FILE}.tmp"
-    with open(temp_file, "w") as f:
-        json.dump(keys, f, indent=2)
-    os.replace(temp_file, KEY_FILE)
-
 def load_private_key(private_pem):
     return serialization.load_pem_private_key(private_pem.encode(), password=None)
-
-def create_private_key():
-    return ec.generate_private_key(ec.SECP256R1())
-
-def private_key_pem(private_key):
-    return private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    ).decode()
 
 def public_key_pem(private_key):
     return private_key.public_key().public_bytes(
@@ -134,19 +119,22 @@ def load_bearer_token():
         raise RuntimeError(f"Supabase login failed: HTTP {response.status_code} {response.text}")
     return validate_admin_access_token(response.json().get("access_token", ""))
 
-def register_device(device_id, private_key, bearer_token):
-    public_key = public_key_pem(private_key)
+def register_device(device_id, bearer_token):
     response = requests.post(REGISTER_URL, json={
         "id": device_id,
-        "publicKey": public_key
-    }, headers={"Authorization": f"Bearer {bearer_token}"}, timeout=10)
+        "simulatorManaged": True
+    }, headers={"Authorization": f"Bearer {bearer_token}"}, timeout=120)
     if not response.ok:
         raise RuntimeError(f"Registration failed for {device_id}: HTTP {response.status_code} {response.text}")
     registered = next((device for device in response.json().get("devices", []) if device.get("id") == device_id), None)
-    if not registered or not same_public_key(registered.get("publicKey"), public_key):
-        raise RuntimeError(f"Gateway did not confirm the registered key for {device_id}")
+    stored_pem = load_keys().get(device_id)
+    if not registered or not stored_pem:
+        raise RuntimeError(f"Gateway did not provision simulator key material for {device_id}")
+    private_key = load_private_key(stored_pem)
+    if not same_public_key(registered.get("publicKey"), public_key_pem(private_key)):
+        raise RuntimeError(f"Gateway registered a different key for {device_id}")
     print(f"[REGISTERED] {device_id} -> HTTP {response.status_code}")
-    return registered
+    return private_key
 
 def fetch_devices(bearer_token):
     response = requests.get(
@@ -183,11 +171,7 @@ def provision_devices(bearer_token):
             print(f"[VERIFIED] {device_id} uses the simulator-owned key")
             continue
 
-        private_key = load_private_key(stored_pem) if stored_pem else create_private_key()
-        if not stored_pem:
-            stored_keys[device_id] = private_key_pem(private_key)
-            save_keys(stored_keys)
-        register_device(device_id, private_key, bearer_token)
+        private_key = register_device(device_id, bearer_token)
         device_keys[device_id] = private_key
 
     return device_keys
@@ -218,18 +202,28 @@ def run_simulator():
     sleep_time = 2.0
 
     bearer_token = load_bearer_token()
-    device_keys = provision_devices(bearer_token)
+    provision_devices(bearer_token)
     print()
 
     while True:
         registered_devices = {device["id"]: device for device in fetch_devices(bearer_token)}
-        device_ids = []
-        for device_id, private_key in device_keys.items():
+        device_keys = {}
+        for device_id, stored_pem in load_keys().items():
             registered = registered_devices.get(device_id)
-            if registered and same_public_key(registered.get("publicKey"), public_key_pem(private_key)):
-                device_ids.append(device_id)
+            if not registered:
+                continue
+            try:
+                private_key = load_private_key(stored_pem)
+            except (TypeError, ValueError):
+                print(f"[SKIPPED] Invalid simulator key for {device_id}")
+                continue
+            if same_public_key(registered.get("publicKey"), public_key_pem(private_key)):
+                device_keys[device_id] = private_key
+        device_ids = list(device_keys)
         if not device_ids:
-            raise RuntimeError("No simulator-owned devices remain registered with matching keys")
+            print("[WAITING] No simulator-owned devices are currently registered")
+            time.sleep(2.0)
+            continue
         payload = generate_payload(device_ids, device_keys)
         print(f"[GENERATED] {payload['device_id']} requesting '{payload['action']}'...")
         

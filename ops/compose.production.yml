@@ -1,0 +1,111 @@
+name: iot-gateway
+
+services:
+  gateway:
+    image: iot-gateway:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile.gateway
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      IOTA_KEY_PATH: /app/data/iota-key.json
+      IOTA_REGISTRY_PATH: /app/data/iota-registry.json
+      SIMULATOR_KEY_FILE: /app/data/ecdsa_keys.json
+    user: ${GATEWAY_UID:-1000}:${GATEWAY_GID:-1000}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - ${GATEWAY_DATA_HOST_PATH:-../runtime}:/app/data
+      - ${FABRIC_CRYPTO_HOST_PATH:-../fabric-samples/test-network/organizations}:/fabric/organizations:ro
+    networks: [app, monitoring]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 6s
+      start_period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  frontend:
+    image: iot-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ../frontend
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL:?set VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY:?set VITE_SUPABASE_ANON_KEY}
+    init: true
+    restart: unless-stopped
+    networks: [app]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  edge:
+    image: nginx:1.29-alpine
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME}
+    init: true
+    restart: unless-stopped
+    depends_on:
+      gateway: { condition: service_healthy }
+      frontend: { condition: service_healthy }
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/edge.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./tls:/etc/nginx/tls:ro
+    networks: [app, monitoring]
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "/dev/null", "https://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=30d"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks: [monitoring]
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.27.0
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    networks: [monitoring]
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    restart: unless-stopped
+    command: ["--path.rootfs=/host"]
+    volumes:
+      - /:/host:ro,rslave
+    networks: [monitoring]
+
+networks:
+  app:
+  monitoring:
+
+volumes:
+  prometheus-data:

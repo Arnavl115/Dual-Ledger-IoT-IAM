@@ -1,69 +1,95 @@
 #!/usr/bin/env bash
 # Publish IOTA Notarization Move package to testnet and capture package ID
-# Requires: Rust toolchain, cargo, IOTA CLI 1.14.0, funded testnet address
+# Requires: git, Node.js, pinned IOTA CLI, funded testnet address
 # Outputs: IOTA_NOTARIZATION_PKG_ID to be set in .env
-set -e
+set -euo pipefail
 
+ROOTDIR=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=dependency-versions.env
+. "$ROOTDIR/scripts/dependency-versions.env"
 NODE_URL=${IOTA_NODE_URL:-https://api.testnet.iota.cafe}
-FAUCET_URL=${IOTA_FAUCET_URL:-https://faucet.testnet.iota.cafe}
+ENV_ALIAS=iot-gateway-testnet
 
 echo "========================================="
 echo " IOTA Notarization Package Publish"
 echo "========================================="
 
 if ! command -v iota &>/dev/null; then
-  echo "[1/5] Installing IOTA CLI 1.14.0 (requires Rust)..."
-  cargo install iota --version 1.14.0 --locked
+  echo "ERROR: IOTA CLI $IOTA_CLI_VERSION is required. Run scripts/install-iota-cli.sh." >&2
+  exit 1
+fi
+CLI_OUTPUT=$(iota --version 2>&1)
+CLI_VERSION=$(printf '%s\n' "$CLI_OUTPUT" | sed -n 's/^iota \([0-9][0-9.]*\).*/\1/p')
+if [ "$CLI_VERSION" != "$IOTA_CLI_VERSION" ]; then
+  echo "ERROR: IOTA CLI $IOTA_CLI_VERSION is required; found: $CLI_OUTPUT" >&2
+  echo "Install the verified release with scripts/install-iota-cli.sh." >&2
+  exit 1
 fi
 
-echo "[1/5] IOTA CLI: $(iota --version 2>&1 | head -1)"
+echo "[1/5] IOTA CLI: $CLI_OUTPUT"
 echo "      Node: $NODE_URL"
 
-# 2. Ensure testnet env and address
-if ! iota client envs 2>&1 | grep -q testnet; then
-  echo "[2/5] Creating testnet env..."
-  iota client new-env --alias testnet --rpc "$NODE_URL"
+# 2. Ensure the dedicated environment alias points at the configured node.
+ENVS_JSON=$(iota client envs --json)
+ENV_STATE=$(printf '%s' "$ENVS_JSON" | node -e '
+let value = ""; process.stdin.on("data", chunk => value += chunk).on("end", () => {
+  const parsed = JSON.parse(value); const envs = Array.isArray(parsed[0]) ? parsed[0] : parsed;
+  const env = envs.find(item => item && item.alias === process.argv[1]);
+  if (!env) return process.stdout.write("missing");
+  const rpc = String(env.rpc || env.rpcUrl || env.url || "").replace(/\/$/, "");
+  process.stdout.write(rpc === process.argv[2].replace(/\/$/, "") ? "match" : "mismatch");
+});' "$ENV_ALIAS" "$NODE_URL")
+if [ "$ENV_STATE" = "missing" ]; then
+  echo "[2/5] Creating verified testnet environment..."
+  iota client new-env --alias "$ENV_ALIAS" --rpc "$NODE_URL"
+elif [ "$ENV_STATE" != "match" ]; then
+  echo "ERROR: IOTA environment $ENV_ALIAS does not point to $NODE_URL; remove or correct it before publishing." >&2
+  exit 1
 fi
-iota client switch --env testnet || true
+iota client switch --env "$ENV_ALIAS"
 
-if ! iota client addresses 2>&1 | grep -q "0x"; then
+if ! iota client active-address --json >/dev/null 2>&1; then
   echo "[2/5] Creating new Ed25519 address..."
   iota client new-address ed25519
 fi
 
-ADDR=$(iota client addresses 2>&1 | grep -o "0x[0-9a-f]*" | head -1)
+ADDR=$(iota client active-address --json | node -e '
+let value = ""; process.stdin.on("data", chunk => value += chunk).on("end", () => {
+  const address = JSON.parse(value);
+  if (typeof address !== "string" || !/^0x[0-9a-f]{64}$/.test(address)) process.exit(1);
+  process.stdout.write(address);
+});')
 echo "      Active address: $ADDR"
 
-# 3. Fund from faucet if empty
-echo "[3/5] Checking balance..."
-BALANCE=$(iota client balance --address "$ADDR" 2>&1 | grep -o "[0-9]*" | head -1 || echo "0")
-if [ "$BALANCE" = "0" ] || [ -z "$BALANCE" ]; then
-  echo "      Requesting faucet funds for $ADDR ..."
-  curl -c /tmp/iota-cookie.txt -s "$FAUCET_URL" > /dev/null || true
-  # Use IOTA faucet API
-  iota client faucet --address "$ADDR" 2>&1 | head -20 || echo "      Try manual faucet: https://faucet.testnet.iota.cafe -> paste $ADDR"
-  echo "      Waiting 5s for funds..."
-  sleep 5
-fi
-iota client switch --address "$ADDR" || true
+# 3. Confirm the selected address and let publish report insufficient gas.
+echo "[3/5] Selecting active address..."
+iota client switch --address "$ADDR"
 
-# 4. Clone and publish Notarization Move package
-if [ ! -d "/tmp/notarization" ]; then
-  echo "[4/5] Cloning iotaledger/notarization..."
-  git clone https://github.com/iotaledger/notarization.git /tmp/notarization
-else
-  echo "[4/5] Updating /tmp/notarization..."
-  (cd /tmp/notarization && git pull --ff-only || true)
-fi
+# 4. Fetch the exact source revision used to publish @iota/notarization@0.1.14.
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+SOURCE_DIR="$WORK_DIR/notarization"
+PUBLISH_JSON="$WORK_DIR/publish.json"
+echo "[4/5] Fetching pinned notarization source $IOTA_NOTARIZATION_COMMIT..."
+git clone --filter=blob:none --no-checkout https://github.com/iotaledger/notarization.git "$SOURCE_DIR"
+git -C "$SOURCE_DIR" checkout --detach "$IOTA_NOTARIZATION_COMMIT"
+[ "$(git -C "$SOURCE_DIR" rev-parse HEAD)" = "$IOTA_NOTARIZATION_COMMIT" ] || {
+  echo "ERROR: notarization source revision verification failed" >&2
+  exit 1
+}
 
-cd /tmp/notarization/notarization-move
+cd "$SOURCE_DIR/notarization-move"
 echo "      Publishing Move package (this may take 1-2 minutes)..."
-./scripts/publish_package.sh 2>&1 | tee /tmp/iota-publish.log
-PKG_ID=$(grep -o "0x[0-9a-f]\{64\}" /tmp/iota-publish.log | head -1 || grep -o "0x[0-9a-f]*" /tmp/iota-publish.log | head -1)
+iota client publish --with-unpublished-dependencies --silence-warnings --json --gas-budget 500000000 . | tee "$PUBLISH_JSON"
+PKG_ID=$(node -e '
+const fs = require("node:fs"); const response = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const ids = (response.objectChanges || []).filter(change => change.type === "published").map(change => change.packageId);
+if (ids.length !== 1 || !/^0x[0-9a-f]{64}$/.test(ids[0])) process.exit(1);
+process.stdout.write(ids[0]);
+' "$PUBLISH_JSON")
 
 if [ -z "$PKG_ID" ]; then
-  echo "ERROR: Could not extract package ID. Check /tmp/iota-publish.log"
-  cat /tmp/iota-publish.log
+  echo "ERROR: publish response did not contain exactly one valid package ID" >&2
   exit 1
 fi
 
@@ -79,4 +105,4 @@ echo "  2. Set IOTA_ENABLED=true"
 echo "  3. Restart gateway: node gateway.js"
 echo "  4. Verify: node -e \"require('dotenv').config(); require('./iota-client').getAllDevices().then(console.log)\""
 echo "========================================="
-echo " Full log: /tmp/iota-publish.log"
+echo " The structured publish response was validated before displaying this ID."

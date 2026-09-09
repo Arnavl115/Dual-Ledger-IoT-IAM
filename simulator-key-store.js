@@ -26,7 +26,12 @@ class SimulatorKeyStore {
         if (Object.hasOwn(keys, deviceId)) {
             throw new Error(`Simulator device ${deviceId} already exists`);
         }
-        crypto.createPrivateKey(privateKey);
+        const key = crypto.createPrivateKey(privateKey);
+        const curve = key.asymmetricKeyDetails && key.asymmetricKeyDetails.namedCurve;
+        if (key.type !== 'private' || key.asymmetricKeyType !== 'ec'
+            || !['prime256v1', 'secp256r1', 'P-256'].includes(curve)) {
+            throw new Error('Simulator keys must be P-256 private keys');
+        }
         keys[deviceId] = privateKey;
         this._save(keys);
     }

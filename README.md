@@ -62,7 +62,7 @@ The gateway keeps detailed request data off-chain in Supabase PostgreSQL while u
 
 ### Core
 
-- Node.js 20 or newer
+- Node.js 24 or newer for the gateway (the frontend also supports Node 20.19+ and 22.12+)
 - npm 10 or newer
 - Python 3.8 or newer
 - A Supabase project
@@ -75,8 +75,7 @@ The gateway keeps detailed request data off-chain in Supabase PostgreSQL while u
 
 ### IOTA Mode
 
-- Rust toolchain
-- IOTA CLI 1.14
+- IOTA CLI 1.30.1 installed by the verified project installer
 - Testnet tokens for package publishing and transactions
 
 ## Installation
@@ -124,6 +123,7 @@ Never commit `.env`, service-role credentials, simulator private keys, IOTA sign
 | `SUPABASE_URL` | Recommended | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Recommended | Server-only database credential |
 | `SUPABASE_JWT_SECRET` | Conditional | HS256 fallback for Supabase access-token verification |
+| `ACCESS_LOG_RETENTION_DAYS` | No | Audit retention in days; defaults to `90`, use `0` to disable cleanup |
 | `FABRIC_ENABLED` | No | Enables the Fabric adapter when set to `true` |
 | `CHANNEL_NAME` | Fabric | Fabric channel; defaults to `mychannel` |
 | `CHAINCODE_NAME` | Fabric | Chaincode name; defaults to `deviceregistry` |
@@ -145,14 +145,14 @@ The simulator additionally accepts `SUPABASE_ANON_KEY` and either `SIMULATOR_ACC
 
 | Variable | Description |
 | --- | --- |
-| `VITE_GATEWAY_URL` | Public URL of the Express gateway |
+| `VITE_GATEWAY_URL` | Optional local-development gateway URL; production uses the same-origin proxy |
 | `VITE_SUPABASE_URL` | Supabase project URL |
 | `VITE_SUPABASE_ANON_KEY` | Public Supabase anonymous key |
 
 ## Database Setup
 
-1. Create a Supabase project.
-2. Open the SQL editor and execute `supabase-schema.sql`.
+1. Create a Supabase project and link it with the Supabase CLI.
+2. Apply the ordered migrations with `supabase db push`. Do not run the final-state `supabase-schema.sql` snapshot over an existing database.
 3. Create an Auth user for the administration console.
 4. Set the user's server-controlled `app_metadata.role` to `admin`.
 5. Configure the backend service-role key only in the server environment.
@@ -188,7 +188,7 @@ When neither ledger is enabled, the gateway uses Supabase PostgreSQL when config
 Deploy the local test network and device registry chaincode from Linux or WSL2:
 
 ```bash
-bash scripts/deploy-fabric.sh
+bash scripts/deploy-fabric.sh local
 ```
 
 The script starts `mychannel`, deploys `deviceregistry`, and verifies the Org1 peer. Configure these values before restarting the gateway:
@@ -206,12 +206,19 @@ PEER_HOST_ALIAS=peer0.org1.example.com
 
 The contract supports registration, lookup, key rotation, activation, revocation, toggling, deletion, listing, and device history. Registry mutations require an Org1 administrator identity and emit chaincode events.
 
+The bundled Fabric test network is local-only. Production Fabric topology is organization-specific and must use a reviewed deployment script without resetting the network:
+
+```bash
+FABRIC_PRODUCTION_DEPLOY_SCRIPT=/absolute/path/to/reviewed-deploy.sh \
+  bash scripts/deploy-fabric.sh production
+```
+
 ## IOTA
 
 Install the CLI and publish the Notarization Move package:
 
 ```bash
-cargo install iota --version 1.14.0 --locked
+bash scripts/install-iota-cli.sh
 bash scripts/publish-iota-package.sh
 ```
 
@@ -225,6 +232,7 @@ IOTA_NOTARIZATION_PKG_ID=0xYOUR_PUBLISHED_PACKAGE_ID
 ```
 
 The gateway creates one updatable, destroyable notarization object per device. Generated signer and object-registry files are local runtime state and are excluded from Git.
+Pinned versions, source revisions, and trusted archive checksums are maintained in `scripts/dependency-versions.env`.
 
 ## API
 
@@ -266,6 +274,7 @@ All `/api/*` endpoints below require `Authorization: Bearer <supabase-access-tok
 
 - Device IDs are restricted to 3-64 alphanumeric, underscore, or hyphen characters.
 - Public keys must be canonical SPKI PEM keys on the P-256 curve.
+- Devices created in the dashboard are simulator-managed: the gateway generates their P-256 keypair, stores the private key only in `SIMULATOR_KEY_FILE` (default `ecdsa_keys.json`), and registers the public key on both enabled ledgers.
 - Signatures use SHA-256 and are checked only after timestamp validation.
 - Stale requests and requests more than 30 seconds in the future are rejected.
 - Duplicate request hashes are rejected across restarts when PostgreSQL is configured.
@@ -283,7 +292,11 @@ Run the checks used by this repository:
 npm test
 npm run lint
 npm run test:frontend
-npm --prefix chaincode/device-registry run lint
+npm run test:chaincode
+npm run test:simulator
+npm run lint:frontend
+npm run lint:chaincode
+npm run build:frontend
 ```
 
 Build the production console directly with:
@@ -318,13 +331,15 @@ docker run --detach \
 
 `VITE_GATEWAY_URL` is used only by the local Vite development server. Production builds always use the same-origin proxy, preventing a local development URL from being embedded accidentally. HTTPS termination and the external reverse-proxy configuration are covered separately in the production operations setup.
 
+For the supervised production stack, HTTPS configuration, readiness behavior, monitoring, backups, restore drills, deployment, and rollback procedures, follow [`OPERATIONS.md`](OPERATIONS.md).
+
 ## Production Checklist
 
 - [ ] Set `NODE_ENV=production` and an exact HTTPS `FRONTEND_URL`.
-- [ ] Run `supabase-schema.sql` and provision an admin user.
+- [ ] Apply `supabase/migrations` with `supabase db push` and provision an admin user.
 - [ ] Store all backend secrets in a managed secret store.
 - [ ] Enable and verify at least one authoritative ledger.
-- [ ] Confirm `/health` reports the expected `activeRoute` and `activeBackend`.
+- [ ] Confirm `/health` is live and `/readyz` verifies PostgreSQL plus every enabled ledger.
 - [ ] Build and serve `frontend/dist` behind HTTPS.
 - [ ] Put the gateway behind a TLS reverse proxy and restrict network access.
 - [ ] Register real device P-256 public keys; do not enable demo seeding.

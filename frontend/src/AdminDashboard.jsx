@@ -254,7 +254,6 @@ export default function AdminDashboard() {
     const [isStressModalOpen, setIsStressModalOpen] = useState(false);
     const [isAddDeviceModalOpen, setIsAddDeviceModalOpen] = useState(false);
     const [newDeviceId, setNewDeviceId] = useState('');
-    const [newDeviceKey, setNewDeviceKey] = useState('');
     const [activeRoute, setActiveRoute] = useState('MEMORY');
     const [activeBackend, setActiveBackend] = useState('MEMORY');
     const [dbMode, setDbMode] = useState('MEMORY');
@@ -561,15 +560,14 @@ export default function AdminDashboard() {
 
     const handleAddDevice = async (event) => {
         event.preventDefault();
-        if (!newDeviceId.trim() || !newDeviceKey.trim()) return;
+        if (!newDeviceId.trim()) return;
         setRegistering(true);
         setActionError('');
         try {
-            const res = await apiPost('/api/devices/register', { id: newDeviceId, publicKey: newDeviceKey });
+            const res = await apiPost('/api/devices/register', { id: newDeviceId, simulatorManaged: true });
             const data = await readApiResponse(res, 'Registration failed');
             setDevices(data.devices || []);
             setNewDeviceId('');
-            setNewDeviceKey('');
             setIsAddDeviceModalOpen(false);
         } catch (error) {
             setActionError(error.message);
@@ -868,12 +866,12 @@ export default function AdminDashboard() {
             </main>
 
             {isAddDeviceModalOpen && (
-                <Modal title="Register device" eyebrow="New ledger identity" description="Register a P-256 public identity key on the active backend." onClose={() => { if (!registering) { setActionError(''); setIsAddDeviceModalOpen(false); } }}>
+                <Modal title="Register simulator device" eyebrow="New dual-ledger identity" description="Generate a simulator key and register the device on both Hyperledger Fabric and IOTA." onClose={() => { if (!registering) { setActionError(''); setIsAddDeviceModalOpen(false); } }}>
                     <form onSubmit={handleAddDevice} className="form-stack">
                         <div className="field"><label htmlFor="register-device-id">Device ID</label><input id="register-device-id" type="text" value={newDeviceId} onChange={(event) => setNewDeviceId(event.target.value)} placeholder="SmartLock_FrontDoor" minLength={3} maxLength={64} autoFocus required disabled={registering} aria-describedby={`register-device-id-help${actionError ? ' register-device-error' : ''}`} aria-invalid={Boolean(actionError)} /><small id="register-device-id-help">3–64 letters, numbers, underscores, or hyphens.</small></div>
-                        <div className="field"><label htmlFor="register-device-key">Public key (P-256 PEM)</label><textarea id="register-device-key" value={newDeviceKey} onChange={(event) => setNewDeviceKey(event.target.value)} placeholder={'-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----'} rows={6} required disabled={registering} aria-describedby={`register-device-key-help${actionError ? ' register-device-error' : ''}`} aria-invalid={Boolean(actionError)} /><small id="register-device-key-help">Paste the complete SPKI public key created during provisioning.</small></div>
+                        <div className="callout"><ShieldCheck aria-hidden="true" /><span>The private key stays in the simulator key store. Both ledgers receive only its P-256 public key.</span></div>
                         {actionError && <div id="register-device-error" className="inline-error" role="alert" aria-live="assertive"><AlertCircle aria-hidden="true" /> {actionError}</div>}
-                        <div className="modal__actions"><button className="button button--secondary" type="button" onClick={() => { setActionError(''); setIsAddDeviceModalOpen(false); }} disabled={registering}>Cancel</button><button className="button button--primary" type="submit" disabled={registering}>{registering && <LoaderCircle className="spin" />}{registering ? 'Registering' : 'Register device'}</button></div>
+                        <div className="modal__actions"><button className="button button--secondary" type="button" onClick={() => { setActionError(''); setIsAddDeviceModalOpen(false); }} disabled={registering}>Cancel</button><button className="button button--primary" type="submit" disabled={registering}>{registering && <LoaderCircle className="spin" />}{registering ? 'Registering on both ledgers' : 'Register device'}</button></div>
                     </form>
                 </Modal>
             )}
@@ -899,7 +897,7 @@ export default function AdminDashboard() {
 
             {deleteDeviceTarget && (
                 <Modal title="Delete device" eyebrow="Permanent operation" description="Review and confirm permanent removal of this device identity." onClose={() => { if (!deviceUpdating) { setActionError(''); setDeleteDeviceTarget(null); } }}>
-                    <div className="destructive-confirmation"><Trash2 /><p>Delete <strong>{deleteDeviceTarget.id}</strong> from the active backend? This cannot be undone.</p></div>
+                    <div className="destructive-confirmation"><Trash2 /><p>Delete <strong>{deleteDeviceTarget.id}</strong> from the simulator and both ledgers? This cannot be undone.</p></div>
                     {actionError && <div className="inline-error" role="alert" aria-live="assertive"><AlertCircle aria-hidden="true" /> {actionError}</div>}
                     <div className="modal__actions"><button className="button button--secondary" type="button" onClick={() => { setActionError(''); setDeleteDeviceTarget(null); }} disabled={Boolean(deviceUpdating)}>Cancel</button><button className="button button--danger-subtle" type="button" onClick={deleteDevice} disabled={Boolean(deviceUpdating)}>{deviceOperation === 'delete' && <LoaderCircle className="spin" />}{deviceOperation === 'delete' ? 'Deleting device' : 'Delete device'}</button></div>
                 </Modal>

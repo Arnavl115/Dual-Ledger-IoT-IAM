@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up IoT Gateway PostgreSQL data
+
+[Service]
+Type=oneshot
+User=iot-gateway
+Group=iot-gateway
+EnvironmentFile=/etc/iot-gateway/backup.env
+ExecStart=/opt/iot-gateway/ops/backup-postgres.sh
+PrivateTmp=true
+NoNewPrivileges=true

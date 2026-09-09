@@ -222,7 +222,7 @@ async function writeState(device) {
 // ------------------------------------------------------------------
 
 async function initLedger(seedDevices) {
-    const c = await connect();
+    await connect();
     for (const device of seedDevices) {
         if (!registry[device.id]) {
             await registerDevice(device.id, device.publicKey || device.key);
@@ -251,6 +251,12 @@ async function getAllDevices() {
         }
     }
     return results;
+}
+
+async function checkHealth() {
+    await connect();
+    await iotaClient.getLatestCheckpointSequenceNumber();
+    return true;
 }
 
 async function getDevice(id) {
@@ -352,6 +358,7 @@ module.exports = {
     isEnabled,
     initLedger,
     getAllDevices,
+    checkHealth,
     getDevice,
     registerDevice,
     toggleDeviceStatus,

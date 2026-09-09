@@ -124,6 +124,12 @@ async function getAllDevices() {
     return records.map(toGatewayDevice);
 }
 
+async function checkHealth() {
+    const c = await connectGateway();
+    await c.evaluateTransaction('DeviceExists', '__readiness__');
+    return true;
+}
+
 async function getDevice(id) {
     const c = await connectGateway();
     try {
@@ -224,6 +230,7 @@ module.exports = {
     isEnabled,
     initLedger,
     getAllDevices,
+    checkHealth,
     getDevice,
     getDeviceHistory,
     registerDevice,

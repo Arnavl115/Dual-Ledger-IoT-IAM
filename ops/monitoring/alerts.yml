@@ -1,0 +1,31 @@
+groups:
+  - name: iot-gateway
+    rules:
+      - alert: GatewayEndpointDown
+        expr: probe_success{job="readiness"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} is unavailable"
+          description: "The production liveness/readiness probe has failed for two minutes."
+
+      - alert: GatewayProbeMissing
+        expr: absent(probe_success{job="readiness", instance="http://gateway:3000/readyz"})
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Gateway monitoring target is missing"
+
+      - alert: HostDiskSpaceLow
+        expr: 100 * node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Production host disk space is below 15%"
+
+      - alert: HostMemoryLow
+        expr: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Production host available memory is below 10%"

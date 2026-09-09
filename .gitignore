@@ -13,6 +13,7 @@ npm-debug.log*
 
 # Device ECDSA private keys (simulator-generated)
 ecdsa_keys.json
+runtime/
 
 # IOTA signer keypair + device->notarization mapping (generated at runtime)
 .iota-key.json

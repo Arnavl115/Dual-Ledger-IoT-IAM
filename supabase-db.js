@@ -4,6 +4,18 @@ const { createClient } = require('@supabase/supabase-js');
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const RETENTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
+function parseRetentionDays(value) {
+    if (value === undefined || value === '') return 90;
+    const days = Number(value);
+    if (!Number.isInteger(days) || days < 0 || days > 36500) {
+        throw new Error('ACCESS_LOG_RETENTION_DAYS must be an integer between 0 and 36500');
+    }
+    return days;
+}
+
+const accessLogRetentionDays = parseRetentionDays(process.env.ACCESS_LOG_RETENTION_DAYS);
 
 const isConfigured = Boolean(supabaseUrl && supabaseKey && !supabaseUrl.includes('YOUR_PROJECT_REF'));
 
@@ -15,6 +27,9 @@ const supabase = isConfigured
         },
     })
     : null;
+
+let nextRetentionCleanupAt = 0;
+let retentionCleanupPromise = null;
 
 // -------------------------------
 // Devices table
@@ -105,8 +120,10 @@ async function insertAccessLog(logEntry) {
             status: logEntry.status,
             route: logEntry.route,
             hash: logEntry.hash,
-        });
+            created_at: logEntry.createdAt || new Date().toISOString(),
+    });
     if (error) throw error;
+    void maybeCleanupExpiredAccessLogs();
 }
 
 async function getAccessLogs({ limit = 100, offset = 0 } = {}) {
@@ -133,6 +150,31 @@ async function claimAccessLog(logEntry) {
         }
         throw err;
     }
+}
+
+async function purgeExpiredAccessLogs(now = Date.now(), client = supabase, retentionDays = accessLogRetentionDays) {
+    if (retentionDays === 0) return;
+    const cutoff = new Date(now - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const { error } = await client
+        .from('access_logs')
+        .delete()
+        .lt('created_at', cutoff);
+    if (error) throw error;
+}
+
+async function maybeCleanupExpiredAccessLogs(now = Date.now()) {
+    if (accessLogRetentionDays === 0 || now < nextRetentionCleanupAt) return;
+    if (retentionCleanupPromise) return retentionCleanupPromise;
+
+    retentionCleanupPromise = purgeExpiredAccessLogs(now)
+        .catch(error => {
+            console.error(`   [AUDIT] Retention cleanup failed: ${error.message}`);
+        })
+        .finally(() => {
+            nextRetentionCleanupAt = Date.now() + RETENTION_CLEANUP_INTERVAL_MS;
+            retentionCleanupPromise = null;
+        });
+    return retentionCleanupPromise;
 }
 
 // -------------------------------
@@ -162,6 +204,8 @@ function mapAccessLogRow(row) {
 
 module.exports = {
     isConfigured,
+    accessLogRetentionDays,
+    parseRetentionDays,
     getAllDevices,
     getDevice,
     insertDevice,
@@ -173,4 +217,5 @@ module.exports = {
     insertAccessLog,
     getAccessLogs,
     claimAccessLog,
+    purgeExpiredAccessLogs,
 };

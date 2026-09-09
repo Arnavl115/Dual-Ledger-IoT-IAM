@@ -2,11 +2,19 @@
   "name": "se_project",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "gateway.js",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "test": "node --check gateway.js && node --check fabric-client.js && node --check iota-client.js && node --check supabase-db.js && echo \"✓ All backend syntax checks passed\"",
-    "test:frontend": "cd frontend && npm run build",
-    "lint": "npm --prefix frontend run lint"
+    "test": "node --check gateway.js && node --check fabric-client.js && node --check iota-client.js && node --check supabase-db.js && node --check simulator-key-store.js && node --test test/*.test.js",
+    "test:chaincode": "npm --prefix chaincode/device-registry test",
+    "test:frontend": "npm --prefix frontend test",
+    "test:simulator": "python -m unittest discover -s test -p \"test_*.py\"",
+    "lint": "oxlint gateway.js fabric-client.js iota-client.js supabase-db.js simulator-key-store.js test",
+    "lint:frontend": "npm --prefix frontend run lint",
+    "lint:chaincode": "npm --prefix chaincode/device-registry run lint",
+    "build:frontend": "npm --prefix frontend run build"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +37,7 @@
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.5.4",
     "postcss": "^8.5.24",
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.3",
+    "oxlint": "^1.82.0"
   }
 }

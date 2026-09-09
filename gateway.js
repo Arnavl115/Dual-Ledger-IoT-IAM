@@ -601,7 +601,7 @@ function auditUnavailable(res, err, details) {
     return res.status(503).json({
         status: 'error',
         message: 'Request could not be completed because its audit record was not persisted',
-        ...(details || {}),
+        ...details,
     });
 }
 
@@ -630,19 +630,17 @@ function verifySupabaseToken(token) {
             const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
             return jwt.verify(token, publicKey, {
                 algorithms: jwk.alg ? [jwk.alg] : ['ES256', 'RS256'],
+                audience: 'authenticated',
             });
-        } catch (err) {
+        } catch {
             // try next key
         }
     }
     if (process.env.SUPABASE_JWT_SECRET) {
-        try {
-            return jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
-                algorithms: ['HS256'],
-            });
-        } catch (err) {
-            throw err;
-        }
+        return jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
+            algorithms: ['HS256'],
+            audience: 'authenticated',
+        });
     }
     throw new Error('no verification key available');
 }
@@ -650,14 +648,14 @@ function verifySupabaseToken(token) {
 function requireAuth(req, res, next) {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if (!process.env.SUPABASE_JWT_SECRET && supabaseJwks.length === 0) {
-        return res.status(503).json({ error: 'Authentication service unavailable' });
-    }
     if (!token) {
         return res.status(401).json({ error: 'Unauthorized: Missing bearer token' });
     }
     if (process.env.SUPABASE_SERVICE_ROLE_KEY && token === process.env.SUPABASE_SERVICE_ROLE_KEY) {
         return next();
+    }
+    if (!process.env.SUPABASE_JWT_SECRET && supabaseJwks.length === 0) {
+        return res.status(503).json({ error: 'Authentication service unavailable' });
     }
     try {
         const payload = verifySupabaseToken(token);
@@ -666,7 +664,7 @@ function requireAuth(req, res, next) {
         }
         req.user = payload;
         next();
-    } catch (err) {
+    } catch {
         return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
     }
 }
@@ -686,7 +684,7 @@ setInterval(() => {
     if (tpsHistory.length > 15) {
         tpsHistory.shift();
     }
-}, 2000);
+}, 2000).unref();
 
 function measureStressRequest(req, res, next) {
     const session = stressSession && stressSession.accepting ? stressSession : null;
@@ -822,7 +820,7 @@ function validateSignature(payload, publicKey) {
             key,
             Buffer.from(signature, 'base64')
         );
-    } catch (err) {
+    } catch {
         return false;
     }
 }
@@ -856,6 +854,35 @@ app.get('/health', (req, res) => {
         uptime: process.uptime(),
         timestamp: new Date().toISOString(),
     });
+});
+
+app.get('/readyz', async (req, res) => {
+    const checks = {
+        auth: Boolean(process.env.SUPABASE_JWT_SECRET || supabaseJwks.length),
+        database: dbMode,
+        backends: enabledRoutes,
+    };
+
+    try {
+        await Promise.race([
+            (async () => {
+                if (!checks.auth) throw new Error('authentication verification keys are unavailable');
+                if (process.env.NODE_ENV === 'production' && dbMode !== 'POSTGRES') {
+                    throw new Error('durable database is unavailable');
+                }
+                const dependencyChecks = [];
+                if (dbMode === 'POSTGRES') dependencyChecks.push(db.getDevice('__readiness__'));
+                if (enabledRoutes.includes('FABRIC')) dependencyChecks.push(fabric.checkHealth());
+                if (enabledRoutes.includes('IOTA')) dependencyChecks.push(iota.checkHealth());
+                await Promise.all(dependencyChecks);
+            })(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('dependency check timed out')), 5000)),
+        ]);
+        return res.status(200).json({ status: 'ready', checks, timestamp: new Date().toISOString() });
+    } catch (err) {
+        console.error(`   ⚠️ [READINESS] ${err.message}`);
+        return res.status(503).json({ status: 'not_ready', checks, timestamp: new Date().toISOString() });
+    }
 });
 
 app.get('/api/state', requireAuth, async (req, res) => {
@@ -936,9 +963,9 @@ app.post('/api/devices/toggle', requireAuth, async (req, res) => {
     const { deviceId } = req.body;
     if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
     try {
-        await deviceStore.toggle(deviceId);
+        await withDeviceOperation(deviceId, () => deviceStore.toggle(deviceId));
     } catch (err) {
-        return res.status(500).json({ error: `Toggle failed: ${err.message}` });
+        return res.status(err.status || 500).json({ error: `Toggle failed: ${err.message}` });
     }
     devices = devices.map(d => {
         if (d.id === deviceId) {
@@ -954,24 +981,24 @@ app.post('/api/devices/toggle', requireAuth, async (req, res) => {
 app.post('/api/devices/register', requireAuth, async (req, res) => {
     const { id, publicKey, simulatorManaged = false } = req.body;
     if (typeof id !== 'string' || !id) return res.status(400).json({ error: 'Missing device parameters' });
+    if (typeof simulatorManaged !== 'boolean') return res.status(400).json({ error: 'simulatorManaged must be a boolean' });
     if (!simulatorManaged && !validatePublicKeyPem(publicKey)) return res.status(400).json({ error: 'A valid P-256 SPKI publicKey PEM is required' });
     const formattedId = id.trim().replace(/\s+/g, '_');
     if (formattedId.length < 3 || formattedId.length > 64) return res.status(400).json({ error: 'Device ID must be 3-64 chars' });
     if (!/^[A-Za-z0-9_-]+$/.test(formattedId)) return res.status(400).json({ error: 'Device ID may only contain alphanumeric, underscore, hyphen' });
     const backendContext = {};
+    let registeredDevice;
     try {
-        await withDeviceOperation(formattedId, () => simulatorManaged
+        registeredDevice = await withDeviceOperation(formattedId, () => simulatorManaged
             ? deviceStore.registerSimulatorDevice(formattedId, backendContext)
             : deviceStore.register(formattedId, null, publicKey, backendContext));
     } catch (err) {
-        if (String(err.message).includes('already exists')) {
+        if (err.code === '23505' || String(err.message).includes('already exists')) {
             return res.status(409).json({ error: `Registration failed: ${err.message}` });
         }
         return res.status(err.status || 500).json({ error: `Registration failed: ${err.message}` });
     }
-    const registeredPublicKey = simulatorManaged
-        ? (await fabric.getDevice(formattedId)).publicKey
-        : publicKey;
+    const registeredPublicKey = registeredDevice?.publicKey || publicKey;
     const existing = devices.find(d => d.id === formattedId);
     if (existing) {
         existing.key = registeredPublicKey;
@@ -1001,12 +1028,12 @@ app.post('/api/devices/revoke', requireAuth, async (req, res) => {
     const { deviceId } = req.body;
     if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
     try {
-        await deviceStore.setStatus(deviceId, 'REVOKED');
+        await withDeviceOperation(deviceId, () => deviceStore.setStatus(deviceId, 'REVOKED'));
         devices = devices.map(d => d.id === deviceId ? { ...d, status: 'REVOKED' } : d);
         const list = await deviceStore.getAll();
         res.status(200).json({ devices: list });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
@@ -1014,12 +1041,12 @@ app.post('/api/devices/activate', requireAuth, async (req, res) => {
     const { deviceId } = req.body;
     if (!deviceId) return res.status(400).json({ error: 'Missing deviceId' });
     try {
-        await deviceStore.setStatus(deviceId, 'ACTIVE');
+        await withDeviceOperation(deviceId, () => deviceStore.setStatus(deviceId, 'ACTIVE'));
         devices = devices.map(d => d.id === deviceId ? { ...d, status: 'ACTIVE' } : d);
         const list = await deviceStore.getAll();
         res.status(200).json({ devices: list });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
@@ -1028,11 +1055,11 @@ app.post('/api/devices/update-key', requireAuth, async (req, res) => {
     if (!deviceId || !publicKey) return res.status(400).json({ error: 'deviceId and publicKey required' });
     if (!validatePublicKeyPem(publicKey)) return res.status(400).json({ error: 'A valid P-256 SPKI publicKey PEM is required' });
     try {
-        await deviceStore.updatePublicKey(deviceId, publicKey);
+        await withDeviceOperation(deviceId, () => deviceStore.updatePublicKey(deviceId, publicKey));
         const list = await deviceStore.getAll();
         res.status(200).json({ devices: list });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(err.status || 500).json({ error: err.message });
     }
 });
 
@@ -1226,33 +1253,73 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
     });
 });
 
-app.listen(PORT, () => {
-    console.log("=========================================");
-    console.log(`🚦 IoT API Gateway (production) live!`);
-    console.log(`📡 Listening for edge devices on port ${PORT}`);
-    console.log(`🔗 Active backend: ${activeBackend()}${ledgerError ? ` (error: ${ledgerError})` : ''}`);
-    console.log(`🗄️  Persistence: ${dbMode}${dbMode === 'POSTGRES' ? ' (Supabase)' : ' (in-memory fallback)'}`);
-    console.log(`🌐 CORS origin: ${FRONTEND_URL}`);
-    console.log("=========================================\n");
+app.use((req, res) => res.status(404).json({ error: 'Endpoint not found' }));
+app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const status = err.status || (err.type === 'entity.parse.failed' ? 400 : 500);
+    return res.status(status).json({ error: status === 400 ? 'Invalid JSON request body' : 'Internal server error' });
 });
 
-loadSupabaseJwks();
-
-// Production: do NOT seed fake devices. Only seed if explicitly enabled and DB is empty, using real registered devices.
-// This block is intentionally disabled in production — devices must be registered via /api/devices/register with real PEM keys.
-// If you need demo seeding, set SEED_DEMO_DEVICES=true
-if (process.env.SEED_DEMO_DEVICES === 'true' && dbMode === 'POSTGRES' && enabledRoutes.length === 0) {
-    db.seedDevices(devices).then(() => {
-        console.log("   🌱 [POSTGRES] Demo devices seeded (SEED_DEMO_DEVICES=true).");
-    }).catch(err => {
-        console.error(`   ⚠️ [POSTGRES] Seeding failed: ${err.message}`);
+function start() {
+    const server = app.listen(PORT, () => {
+        console.log("=========================================");
+        console.log(`🚦 IoT API Gateway (production) live!`);
+        console.log(`📡 Listening for edge devices on port ${PORT}`);
+        console.log(`🔗 Active backend: ${activeBackend()}${ledgerError ? ` (error: ${ledgerError})` : ''}`);
+        console.log(`🗄️  Persistence: ${dbMode}${dbMode === 'POSTGRES' ? ' (Supabase)' : ' (in-memory fallback)'}`);
+        console.log(`🌐 CORS origin: ${FRONTEND_URL}`);
+        console.log("=========================================\n");
     });
+
+    loadSupabaseJwks();
+    if (process.env.SEED_DEMO_DEVICES === 'true' && dbMode === 'POSTGRES' && enabledRoutes.length === 0) {
+        db.seedDevices(devices).then(() => {
+            console.log("   🌱 [POSTGRES] Demo devices seeded (SEED_DEMO_DEVICES=true).");
+        }).catch(err => {
+            console.error(`   ⚠️ [POSTGRES] Seeding failed: ${err.message}`);
+        });
+    }
+    if (iota.isEnabled()) {
+        iota.initLedger(devices).then(() => {
+            console.log("   🌱 [IOTA] Initial devices notarized on the Tangle (no-op if already present).");
+        }).catch(err => {
+            console.error(`   ⚠️ [IOTA] Seeding failed: ${err.message}`);
+        });
+    }
+    return server;
 }
 
-if (iota.isEnabled()) {
-    iota.initLedger(devices).then(() => {
-        console.log("   🌱 [IOTA] Initial devices notarized on the Tangle (no-op if already present).");
-    }).catch(err => {
-        console.error(`   ⚠️ [IOTA] Seeding failed: ${err.message}`);
-    });
+function resetForTests({ routes = [], mode = 'MEMORY', memoryDevices = [], jwks = [] } = {}) {
+    enabledRoutes.splice(0, enabledRoutes.length, ...routes);
+    dbMode = mode;
+    devices = memoryDevices.map(device => ({ ...device }));
+    activeRoute = enabledRoutes[0] || fallbackBackend();
+    lastActiveBackend = activeRoute;
+    ledgerError = null;
+    logs = [];
+    SEEN_REQUESTS.clear();
+    pendingDeviceOperations.clear();
+    rateBuckets.clear();
+    supabaseJwks = jwks;
 }
+
+if (require.main === module) start();
+
+module.exports = {
+    app,
+    start,
+    deviceStore,
+    requireAuth,
+    validatePublicKeyPem,
+    validateSignature,
+    isTimestampFresh,
+    withDeviceOperation,
+    __test: {
+        reset: resetForTests,
+        fabric,
+        iota,
+        db,
+        simulatorKeys,
+        state: () => ({ activeRoute, enabledRoutes: [...enabledRoutes], dbMode, ledgerError, devices, logs }),
+    },
+};

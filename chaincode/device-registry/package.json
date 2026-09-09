@@ -4,10 +4,11 @@
     "description": "IoT Device Identity Registry contract for the Dual-Ledger IAM Gateway",
     "main": "index.js",
     "engines": {
-        "node": ">=20"
+        "node": "^20.19.0 || ^22.13.0 || >=24"
     },
     "scripts": {
-        "lint": "eslint *.js */**.js",
+        "lint": "eslint .",
+        "test": "node --test test/*.test.js",
         "start": "fabric-chaincode-node start"
     },
     "engineStrict": true,
@@ -20,6 +21,8 @@
         "sort-keys-recursive": "^2.1.0"
     },
     "devDependencies": {
-        "eslint": "^8.57.0"
+        "@eslint/js": "^10.0.1",
+        "eslint": "^10.10.0",
+        "globals": "^17.12.0"
     }
 }

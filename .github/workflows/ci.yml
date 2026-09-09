@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+            chaincode/device-registry/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix frontend
+          npm ci --prefix chaincode/device-registry
+
+      - name: Lint
+        run: |
+          npm run lint
+          npm run lint:frontend
+          npm run lint:chaincode
+
+      - name: Test
+        run: |
+          npm test
+          npm run test:frontend
+          npm run test:chaincode
+          npm run test:simulator
+
+      - name: Apply and replay database migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for migration in supabase/migrations/*.sql; do
+            psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f "$migration"
+          done
+          psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -f supabase/migrations/202609090002_harden_existing_schema.sql
+          if psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -c \
+            "insert into public.access_logs(request_id,device_id,endpoint,status,route,hash) values ('','device','/api','GRANTED','FABRIC','hash')"; then
+            echo "Audit constraints accepted an empty request ID" >&2
+            exit 1
+          fi
+
+      - name: Validate deployment configuration
+        run: |
+          bash -n install-fabric.sh scripts/*.sh ops/*.sh
+          cp ops/.env.production.example .env
+          docker compose --env-file .env -f ops/compose.production.yml config --quiet
+
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Audit dependencies
+        run: |
+          npm audit --audit-level=moderate
+          npm audit --prefix frontend --audit-level=moderate
+          npm audit --prefix chaincode/device-registry --audit-level=moderate
+
+      - name: Smoke test gateway health endpoint
+        shell: bash
+        run: |
+          PORT=3100 node gateway.js >gateway-smoke.log 2>&1 &
+          gateway_pid=$!
+          trap 'kill "$gateway_pid" 2>/dev/null || true; cat gateway-smoke.log' EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:3100/health | node -e '
+              let body = "";
+              process.stdin.on("data", chunk => body += chunk);
+              process.stdin.on("end", () => {
+                const health = JSON.parse(body);
+                if (health.status !== "ok") process.exit(1);
+              });
+            '; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

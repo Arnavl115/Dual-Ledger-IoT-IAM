@@ -21,8 +21,11 @@ _arg_comp=('' )
 
 # if version not passed in, default to latest released version
 # if ca version not passed in, default to latest released version
-_arg_fabric_version="2.5.16"
-_arg_ca_version="1.5.17"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/dependency-versions.env
+. "$SCRIPT_DIR/scripts/dependency-versions.env"
+_arg_fabric_version="$FABRIC_VERSION"
+_arg_ca_version="$FABRIC_CA_VERSION"
 
 OS=$(uname -s|tr '[:upper:]' '[:lower:]'|sed 's/mingw64_nt.*/windows/')
 ARCH=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
@@ -41,6 +44,30 @@ die()
 	test "${_PRINT_HELP:-no}" = yes && print_help >&2
 	echo "$1" >&2
 	exit "${_ret}"
+}
+
+verify_sha256()
+{
+    local expected=$1
+    local file=$2
+    if command -v sha256sum >/dev/null; then
+        echo "${expected}  ${file}" | sha256sum --check --status
+    elif command -v shasum >/dev/null; then
+        [ "$(shasum -a 256 "${file}" | awk '{print $1}')" = "${expected}" ]
+    else
+        die "sha256sum or shasum is required to verify downloaded binaries"
+    fi
+}
+
+sha256_value()
+{
+    if command -v sha256sum >/dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "sha256sum or shasum is required to verify installed binaries"
+    fi
 }
 
 
@@ -230,16 +257,12 @@ cloneSamplesRepo() {
         cd fabric-samples
     else
         echo "===> Cloning hyperledger/fabric-samples repo"
-        git clone -b main https://github.com/hyperledger/fabric-samples.git && cd fabric-samples
+        git clone --filter=blob:none --no-checkout https://github.com/hyperledger/fabric-samples.git && cd fabric-samples
     fi
 
-    if GIT_DIR=.git git rev-parse v${VERSION} >/dev/null 2>&1; then
-        echo "===> Checking out v${VERSION} of hyperledger/fabric-samples"
-        git checkout -q v${VERSION}
-    else
-        echo "fabric-samples v${VERSION} does not exist, defaulting to main. fabric-samples main branch is intended to work with recent versions of fabric."
-        git checkout -q main
-    fi
+    echo "===> Checking out pinned fabric-samples revision ${FABRIC_SAMPLES_COMMIT}"
+    git checkout -q --detach "${FABRIC_SAMPLES_COMMIT}"
+    [ "$(git rev-parse HEAD)" = "${FABRIC_SAMPLES_COMMIT}" ] || die "fabric-samples revision verification failed"
 }
 
 # This will download the .tar.gz
@@ -247,12 +270,37 @@ download() {
     local BINARY_FILE=$1
     local URL=$2
     local DEST_DIR=$(pwd)
+    local EXPECTED_SHA256
+    local TEMP_FILE
+    local rc=""
+    case "${BINARY_FILE}" in
+        hyperledger-fabric-darwin-amd64-2.5.16.tar.gz) EXPECTED_SHA256=18acff3d9b782ddfc11b285af85f6e9f4a8d47504d8e6d230d1993f8e08833a6 ;;
+        hyperledger-fabric-darwin-arm64-2.5.16.tar.gz) EXPECTED_SHA256=9f226e9c7e40f81b4f76db349438f8742beeb43d88519b73f2095e4f65f3ab42 ;;
+        hyperledger-fabric-linux-amd64-2.5.16.tar.gz) EXPECTED_SHA256=18c91e7f2f11b601e6622cc70454d568af897707ee9adf111e9fa91a233881bf ;;
+        hyperledger-fabric-linux-arm64-2.5.16.tar.gz) EXPECTED_SHA256=c3c1809afab1998e9f2dd37ccd7fc5fa97658cdeaaa9ca0de29e896bf6dee029 ;;
+        hyperledger-fabric-windows-amd64-2.5.16.tar.gz) EXPECTED_SHA256=fdcefd5e0f9343adf7b2e34461a0d5c531a375ce8c86cf9f4caff48982d07d1c ;;
+        hyperledger-fabric-ca-darwin-amd64-1.5.17.tar.gz) EXPECTED_SHA256=1b5ef1fd364aa9cf2e8cceec56adae094a3d3b53bca454635a51cf87911878fc ;;
+        hyperledger-fabric-ca-darwin-arm64-1.5.17.tar.gz) EXPECTED_SHA256=de5a283b7d33ae7676795e969cb5e7f26d93e15e1b90788dc0d3d9ba37a098de ;;
+        hyperledger-fabric-ca-linux-amd64-1.5.17.tar.gz) EXPECTED_SHA256=839287630fa6f89c8490a424a38b821c1cfe696f2322522ddca5825e61b458e6 ;;
+        hyperledger-fabric-ca-linux-arm64-1.5.17.tar.gz) EXPECTED_SHA256=042c477bcfafffdf7060a543bfaced30879c6d0424bfb08e94b12e59a3bc2ae6 ;;
+        hyperledger-fabric-ca-windows-amd64-1.5.17.tar.gz) EXPECTED_SHA256=5904e46edc897bbb4c2d553801df7a1313ac5fcdae9af30b15696af3e8e3d4e9 ;;
+        *) die "No trusted SHA-256 digest for ${BINARY_FILE}" ;;
+    esac
+    TEMP_FILE=$(mktemp)
     echo "===> Downloading: " "${URL}"
     if [ -d fabric-samples ]; then
        DEST_DIR="fabric-samples"
     fi
     echo "===> Will unpack to: ${DEST_DIR}"
-    curl -L --retry 5 --retry-delay 3 "${URL}" | tar xz -C "${DEST_DIR}"|| rc=$?
+    curl --fail --location --retry 5 --retry-delay 3 --output "${TEMP_FILE}" "${URL}" || rc=$?
+    if [ -z "$rc" ] && ! verify_sha256 "${EXPECTED_SHA256}" "${TEMP_FILE}"; then
+        echo "==> SHA-256 verification failed for ${BINARY_FILE}." >&2
+        rc=1
+    fi
+    if [ -z "$rc" ]; then
+        tar xzf "${TEMP_FILE}" -C "${DEST_DIR}" || rc=$?
+    fi
+    rm -f "${TEMP_FILE}"
     if [ -n "$rc" ]; then
         echo "==> There was an error downloading the binary file."
         return 22
@@ -279,6 +327,17 @@ pullBinaries() {
         echo
         exit
     fi
+
+    local BIN_ROOT="$(pwd)/bin"
+    if [ -d "$(pwd)/fabric-samples/bin" ]; then
+        BIN_ROOT="$(pwd)/fabric-samples/bin"
+    fi
+    [ -x "${BIN_ROOT}/peer" ] || die "Downloaded archive did not install the peer binary"
+    {
+        echo "FABRIC_VERSION=${VERSION}"
+        echo "FABRIC_CA_VERSION=${CA_VERSION}"
+        echo "PEER_SHA256=$(sha256_value "${BIN_ROOT}/peer")"
+    } > "${BIN_ROOT}/.verified-install"
 }
 
 pullImages() {
