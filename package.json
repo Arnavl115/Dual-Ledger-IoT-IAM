@@ -14,7 +14,9 @@
     "lint": "oxlint gateway.js fabric-client.js iota-client.js supabase-db.js simulator-key-store.js test",
     "lint:frontend": "npm --prefix frontend run lint",
     "lint:chaincode": "npm --prefix chaincode/device-registry run lint",
-    "build:frontend": "npm --prefix frontend run build"
+    "build:frontend": "npm --prefix frontend run build",
+    "benchmark": "node scripts/benchmark.js",
+    "benchmark:analyze": "node scripts/analyze-benchmarks.js"
   },
   "keywords": [],
   "author": "",

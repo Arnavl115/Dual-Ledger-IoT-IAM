@@ -19,6 +19,8 @@ The gateway keeps detailed request data off-chain in Supabase PostgreSQL while u
 
 ![Dual-Ledger IoT IAM Gateway architecture](docs/architecture.svg)
 
+Publication sequence diagrams and the reproducible benchmark protocol are in [`docs/experiments/README.md`](docs/experiments/README.md).
+
 ### Request Flow
 
 1. A device signs `device_id:action:timestamp` with its P-256 private key.
@@ -124,6 +126,8 @@ Never commit `.env`, service-role credentials, simulator private keys, IOTA sign
 | `SUPABASE_SERVICE_ROLE_KEY` | Recommended | Server-only database credential |
 | `SUPABASE_JWT_SECRET` | Conditional | HS256 fallback for Supabase access-token verification |
 | `ACCESS_LOG_RETENTION_DAYS` | No | Audit retention in days; defaults to `90`, use `0` to disable cleanup |
+| `ACCESS_RATE_LIMIT_WINDOW_MS` | No | Access rate-limit window; defaults to `60000` |
+| `ACCESS_RATE_LIMIT_MAX` | No | Requests per client per window; defaults to `120`; change only for controlled tests |
 | `FABRIC_ENABLED` | No | Enables the Fabric adapter when set to `true` |
 | `CHANNEL_NAME` | Fabric | Fabric channel; defaults to `mychannel` |
 | `CHAINCODE_NAME` | Fabric | Chaincode name; defaults to `deviceregistry` |

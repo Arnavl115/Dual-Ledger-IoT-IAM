@@ -1,0 +1,20 @@
+{
+  "baseUrl": "http://localhost:3000",
+  "backend": "SYNCHRONIZED",
+  "lifecycleIterations": 20,
+  "requestTimeoutMs": 120000,
+  "resourceIntervalMs": 1000,
+  "gatewayPid": null,
+  "containers": [],
+  "network": {
+    "topology": "REPLACE_WITH_ACTUAL_TOPOLOGY",
+    "clientToGatewayRttMs": null,
+    "gatewayToFabricRttMs": null,
+    "gatewayToIotaRttMs": null,
+    "gatewayToPostgresRttMs": null,
+    "bandwidthMbps": null,
+    "transport": "REPLACE_WITH_TRANSPORT_DESCRIPTION"
+  },
+  "machineNotes": "REPLACE_WITH_MACHINE_AND_RUNTIME_DETAILS",
+  "output": "results/final-raw/synchronized-registration.jsonl"
+}

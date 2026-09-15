@@ -1,0 +1,207 @@
+% Publication-ready LaTeX source for the manuscript's equations and tables.
+% Intended for an IEEEtran two-column document.
+% Required packages: amsmath, amssymb, booktabs, tabularx, array, graphicx.
+
+% Consistent state and request notation.
+\newcommand{\ledgerSet}{\mathcal{L}=\{\mathrm{F},\mathrm{I}\}}
+\begin{align}
+m &= \operatorname{UTF8}\!\left(
+  \mathit{id}\parallel\texttt{:}\parallel a\parallel\texttt{:}\parallel t
+\right), \label{eq:request-message}\\
+\mathit{rid} &= \operatorname{SHA\text{-}256}(m), \label{eq:replay-id}\\
+\operatorname{Fresh}(t) &\Longleftrightarrow
+  T-W \le 1000t \le T+\delta, \label{eq:freshness}\\
+\operatorname{Accept} &= V\land F\land L\land A\land S\land C, \label{eq:accept}\\
+\mathcal{C}(d) &\Longleftrightarrow
+  pk_{\mathrm{F}}(d)=pk_{\mathrm{I}}(d)
+  \land s_{\mathrm{F}}(d)=s_{\mathrm{I}}(d), \label{eq:agreement}\\
+T_{\mathrm{dual}} &= T_{\mathrm{F}}+T_{\mathrm{I}}+T_{\mathrm{P}}+T_{\mathrm{K}}.
+\label{eq:dual-latency}
+\end{align}
+For each ledger $L\in\ledgerSet$, device state is
+$D_L(d)=\bigl(pk_L(d),s_L(d)\bigr)$, where
+$s_L(d)\in\{\textsc{active},\textsc{revoked}\}$.
+
+\begin{table*}[t]
+\caption{Position Relative to Representative Systems}
+\label{tab:related-work}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l l l X X@{}}
+\toprule
+System & Ledger model & Authentication & Lifecycle behavior & Difference in this work \\
+\midrule
+Novo~[4] & Blockchain hubs & Architecture dependent & Policy and access management & No Fabric--IOTA adapter comparison \\
+Fabric IoT~[5] & Hyperledger Fabric & System-specific identity & Fabric policy workflow & No selectable IOTA registry \\
+Jiang et al.~[9] & Consortium chain and IOTA & Data-management focus & Cross-chain data processing & Different objective and IOTA generation \\
+IoT BDMS~[10] & Hyperledger Fabric & ECDSA device keys & Registry and authentication contracts & No dual-backend routing or compensation \\
+This prototype & Fabric or IOTA authority & P-256 ECDSA request signature & Common operations and compensated dual registration & Measures route and synchronization tradeoffs \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Implemented Controls and Residual Risks}
+\label{tab:controls}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l X X X@{}}
+\toprule
+Threat & Implemented control & Repository evidence & Residual risk \\
+\midrule
+Request forgery & P-256 ECDSA, SHA-256, canonical SPKI keys & \texttt{gateway.js}, simulator, chaincode & Key theft or gateway compromise \\
+Replay & Five-minute freshness and atomic request-ID claim & \texttt{gateway.js}, database migrations & Second-level collisions and memory-mode restart loss \\
+Revoked identity & Selected-ledger authoritative status lookup & Gateway and ledger adapters & Propagation and route divergence \\
+Backend outage & Authoritative access lookup returns HTTP 503 & Security and operations tests & Deliberately reduced availability \\
+Unauthorized administration & Supabase JWT checks and Org1 admin rule & Gateway and chaincode & Single-organization governance \\
+Flooding & Per-IP sliding-window limit & \texttt{gateway.js} & Not shared across replicas \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Implementation Map}
+\label{tab:implementation}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l l X X@{}}
+\toprule
+Component & File & Responsibility & Publication evidence \\
+\midrule
+Gateway & \texttt{gateway.js} & Routing, signatures, replay, audit, lifecycle, telemetry & Algorithms, endpoint tests, raw rows \\
+Fabric adapter & \texttt{fabric-client.js} & Gateway connection, deadlines, contract calls & Transaction latency and identifiers \\
+Fabric contract & \texttt{deviceRegistry.js} & Validation, state, history, events & Chaincode tests and event records \\
+IOTA adapter & \texttt{iota-client.js} & Dynamic Notarization lifecycle and mapping & Object identifiers and transaction digests \\
+Persistence & \texttt{supabase-db.js} & Projection, audit, replay claim & Migrations and database timing \\
+Simulator & \texttt{iot_simulator.py} & P-256 keys and signed requests & Fixed seed and request rows \\
+Operations & \texttt{ops/}, \texttt{scripts/} & Deployment, recovery, and analysis & Manifests and recovery experiments \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table*}[t]
+\caption{Required Raw Measurement Schemas}
+\label{tab:schemas}
+\centering
+\scriptsize
+\begin{tabularx}{\textwidth}{@{}l X X@{}}
+\toprule
+Dataset & Required columns & Purpose \\
+\midrule
+Access & \texttt{run\_id, route, concurrency, start\_ns, end\_ns, latency\_ms, ledger\_lookup\_ms, replay\_audit\_persistence\_ms, gateway\_total\_ms, status\_code, cpu\_pct, rss\_mb} & End-to-end and component latency, throughput, rejection, and resources \\
+Lifecycle & \texttt{run\_id, operation, route, start\_ns, submit\_ns, commit\_ns, visible\_ns, tx\_id, rollback\_success, error\_class} & Mutation, visibility, and compensation \\
+Environment & \texttt{commit\_hash, versions, topology, RTT, clock\_skew, limiter, warmup, runs, seed} & Reproduction and confound control \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+\begin{table}[t]
+\caption{Synchronized Registration Stage Latency (ms)}
+\label{tab:synchronized-latency}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.4pt}
+\begin{tabular}{@{}lrrrrrrrr@{}}
+\toprule
+Stage & $n$ & Mean & Median & p95 & p99 & Min & Max & SD \\
+\midrule
+$T_{\mathrm{F}}$ & 42 & 2051.4 & 2037.6 & 2079.1 & 2276.7 & 2022.4 & 2412.1 & 58.2 \\
+$T_{\mathrm{I}}$ & 42 & 2092.9 & 1747.4 & 3912.1 & 4601.1 & 1565.9 & 5068.2 & 841.5 \\
+$T_{\mathrm{P}}$ & 42 & 149.9 & 90.2 & 371.4 & 1244.8 & 56.5 & 1805.2 & 269.0 \\
+$T_{\mathrm{K}}$ & 42 & 3.0 & 2.9 & 3.8 & 4.7 & 2.1 & 5.1 & 0.6 \\
+$T_{\mathrm{dual}}$ & 42 & 4297.2 & 3884.6 & 6095.2 & 6925.9 & 3718.3 & 7488.2 & 902.7 \\
+Endpoint & 42 & 4407.5 & 3993.3 & 6199.5 & 7044.5 & 3812.8 & 7608.5 & 905.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[t]
+\caption{Authorization Latency and Throughput by Route and Concurrency}
+\label{tab:authorization}
+\centering
+\scriptsize
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Route & $c$ & Median ms [95\% CI] & p95 ms [95\% CI] & p99 ms [95\% CI] & Throughput req/s [95\% CI] \\
+\midrule
+Fabric & 1 & 66.7 [65.4, 67.9] & 187.5 [140.8, 234.2] & 367.3 [266.5, 468.0] & 12.02 [11.15, 12.90] \\
+Fabric & 2 & 102.0 [100.8, 103.2] & 260.1 [204.8, 315.5] & 467.7 [389.0, 546.3] & 16.44 [15.36, 17.52] \\
+Fabric & 4 & 237.3 [207.0, 267.6] & 602.2 [495.7, 708.7] & 830.9 [669.3, 992.4] & 14.99 [13.64, 16.34] \\
+Fabric & 8 & 469.7 [408.9, 530.6] & 1094.0 [907.2, 1280.8] & 1366.2 [1128.7, 1603.7] & 15.04 [13.79, 16.28] \\
+IOTA & 1 & 290.7 [278.2, 303.2] & 676.1 [618.4, 733.8] & 1146.7 [970.0, 1323.3] & 2.80 [2.67, 2.93] \\
+IOTA & 2 & 530.9 [504.9, 557.0] & 868.8 [803.4, 934.2] & 1377.5 [1131.9, 1623.1] & 3.60 [3.43, 3.77] \\
+IOTA & 4 & 1123.1 [1102.8, 1143.3] & 1869.7 [1724.0, 2015.4] & 4561.7 [3199.8, 5923.6] & 3.28 [3.17, 3.39] \\
+IOTA & 8 & 1793.5 [1759.5, 1827.6] & 2010.9 [1940.3, 2081.4] & 2235.4 [2078.4, 2392.5] & 4.41 [4.33, 4.49] \\
+PostgreSQL & 1 & 103.4 [102.6, 104.1] & 172.3 [145.6, 199.0] & 300.2 [242.8, 357.5] & 8.81 [8.47, 9.15] \\
+PostgreSQL & 2 & 139.7 [134.8, 144.7] & 264.1 [237.1, 291.2] & 486.6 [451.9, 521.3] & 13.14 [12.80, 13.47] \\
+PostgreSQL & 4 & 208.0 [206.4, 209.5] & 402.8 [363.9, 441.8] & 674.3 [588.5, 760.2] & 16.84 [16.45, 17.24] \\
+PostgreSQL & 8 & 397.1 [389.0, 405.3] & 716.6 [636.5, 796.8] & 1285.2 [1022.2, 1548.1] & 18.23 [17.53, 18.94] \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table}[t]
+\caption{Device Lifecycle Endpoint Latency}
+\label{tab:lifecycle}
+\centering
+\footnotesize
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Route & Operation & Median (ms) & p95 (ms) & Success \\
+\midrule
+Fabric & Register & 2189.2 & 2388.3 & 20/20 \\
+Fabric & Revoke & 2111.7 & 2182.8 & 20/20 \\
+Fabric & Activate & 2123.0 & 2199.8 & 20/20 \\
+Fabric & Rotate & 2119.5 & 2157.2 & 20/20 \\
+Fabric & Delete & 2115.5 & 2195.5 & 20/20 \\
+IOTA & Register & 2390.4 & 4378.5 & 160/161 \\
+IOTA & Revoke & 2910.3 & 4101.2 & 160/160 \\
+IOTA & Activate & 2861.2 & 4669.0 & 160/160 \\
+IOTA & Rotate & 2849.2 & 4695.2 & 160/160 \\
+IOTA & Delete & 2314.4 & 4365.8 & 160/160 \\
+PostgreSQL & Register & 169.9 & 220.7 & 160/160 \\
+PostgreSQL & Revoke & 91.0 & 131.7 & 160/160 \\
+PostgreSQL & Activate & 91.7 & 130.8 & 160/160 \\
+PostgreSQL & Rotate & 93.5 & 126.7 & 160/160 \\
+PostgreSQL & Delete & 91.8 & 145.0 & 160/160 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Measured Host Resource Utilization}
+\label{tab:resources}
+\centering
+\footnotesize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+Route or component & Mean CPU & Mean RSS (MiB) \\
+\midrule
+Fabric gateway & 7.18\% & 158.3 \\
+Fabric Org1 peer & 5.20\% & 85.5 \\
+Fabric orderer & 0.13\% & 21.1 \\
+Fabric chaincode & 2.63\% & 64.6 \\
+IOTA gateway & 2.33\% & 122.8 \\
+PostgreSQL gateway & 8.58\% & 159.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[t]
+\caption{Result Summary from Released Raw Data}
+\label{tab:summary}
+\centering
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}X l l l X@{}}
+\toprule
+Metric & PostgreSQL & Fabric & IOTA & Interpretation \\
+\midrule
+Authorization p95 at target load & 716.65 ms & 1093.99 ms & 2010.85 ms & IOTA path has the largest observed latency \\
+Peak successful throughput & 18.23 req/s ($c=8$) & 16.44 req/s ($c=2$) & 4.41 req/s ($c=8$) & PostgreSQL highest; Fabric peaks at $c=2$ \\
+Registration endpoint p95 & 220.74 ms & 2388.28 ms & 4378.48 ms & IOTA has the largest endpoint overhead \\
+Revocation endpoint p95 & 131.73 ms & 2182.84 ms & 4101.17 ms & IOTA has the longest observed endpoint window \\
+Valid-request false rejection & 0\% & 0\% & 0\% & Selected successful steady-state runs \\
+Gateway peak CPU; memory & 36.49\%; 175.20 MiB & 22.53\%; 181.33 MiB & 17.01\%; 172.01 MiB & PostgreSQL peak CPU; Fabric peak memory \\
+\bottomrule
+\end{tabularx}
+\end{table*}

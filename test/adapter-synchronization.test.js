@@ -86,6 +86,25 @@ test('dual-ledger registration compensates Fabric when IOTA fails', async t => {
     ]);
 });
 
+test('dual-ledger registration reports high-resolution stage timings', async t => {
+    const deviceId = `device-timed-${process.pid}-${Date.now()}`;
+    t.after(() => { __test.simulatorKeys.remove(deviceId); });
+    replace(t, __test.fabric, 'getDevice', async () => null);
+    replace(t, __test.iota, 'getDevice', async () => null);
+    replace(t, __test.fabric, 'registerDevice', async (id, publicKey) => ({ id, publicKey, status: 'ACTIVE' }));
+    replace(t, __test.iota, 'registerDevice', async () => {});
+    replace(t, __test.db, 'upsertDevice', async () => {});
+    __test.reset({ routes: ['FABRIC', 'IOTA'], mode: 'POSTGRES' });
+    const context = {};
+
+    await deviceStore.registerSimulatorDevice(deviceId, context);
+
+    assert.deepEqual(Object.keys(context.registrationTimingMs), ['T_F', 'T_I', 'T_P', 'T_K', 'T_total']);
+    for (const duration of Object.values(context.registrationTimingMs)) {
+        assert.equal(Number.isFinite(duration) && duration >= 0, true);
+    }
+});
+
 test('partial dual-ledger deletion reports every failed adapter', async t => {
     replace(t, __test.fabric, 'getDevice', async () => ({ id: 'device-5' }));
     replace(t, __test.iota, 'getDevice', async () => ({ id: 'device-5' }));

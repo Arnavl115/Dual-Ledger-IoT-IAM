@@ -107,7 +107,10 @@ test('access rejects stale, future, malformed, and mismatched signatures', async
 test('authenticated requests are claimed once and revoked devices remain forbidden', async () => {
     __test.reset({ memoryDevices: [{ id: 'device-1', publicKey: keyPair.publicKey, status: 'ACTIVE' }] });
     const payload = signedPayload('device-1');
-    assert.equal((await request('/api/access', { method: 'POST', token: null, body: payload })).response.status, 200);
+    const granted = await request('/api/access', { method: 'POST', token: null, body: payload });
+    assert.equal(granted.response.status, 200);
+    assert.deepEqual(Object.keys(granted.body.accessTimingMs), ['ledgerLookup', 'replayAuditPersistence', 'gatewayTotal']);
+    assert.equal(Object.values(granted.body.accessTimingMs).every(value => Number.isFinite(value) && value >= 0), true);
     const replay = await request('/api/access', { method: 'POST', token: null, body: payload });
     assert.equal(replay.response.status, 401);
     assert.match(replay.body.message, /replay detected/);

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820" role="img" aria-labelledby="title desc">
+  <title id="title">Access-request sequence</title><desc id="desc">Sequence implemented by the access endpoint in gateway.js.</desc>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#334155"/></marker><style>text{font-family:Inter,Arial,sans-serif;fill:#172033}.t{font-size:24px;font-weight:700}.h{font-size:15px;font-weight:700}.n{font-size:12px;fill:#475569}.life{stroke:#94a3b8;stroke-width:1.5;stroke-dasharray:5 5}.msg{stroke:#334155;stroke-width:1.7;marker-end:url(#a)}.return{stroke:#64748b;stroke-width:1.5;stroke-dasharray:6 4;marker-end:url(#a)}.note{fill:#f8fafc;stroke:#cbd5e1}.deny{fill:#fff1f2;stroke:#be123c}.ok{fill:#ecfdf5;stroke:#047857}</style></defs>
+  <rect width="1200" height="820" fill="#fff"/><text x="50" y="44" class="t">Access-request sequence derived from <tspan font-family="monospace">gateway.js</tspan></text>
+  <g text-anchor="middle"><text x="120" y="92" class="h">IoT device</text><text x="390" y="92" class="h">Express gateway</text><text x="675" y="92" class="h">Selected ledger</text><text x="990" y="92" class="h">PostgreSQL / replay store</text></g>
+  <g class="life"><line x1="120" y1="110" x2="120" y2="770"/><line x1="390" y1="110" x2="390" y2="770"/><line x1="675" y1="110" x2="675" y2="770"/><line x1="990" y1="110" x2="990" y2="770"/></g>
+  <line x1="120" y1="140" x2="390" y2="140" class="msg"/><text x="255" y="130" text-anchor="middle" class="n">POST /api/access {device_id, action, timestamp, signature}</text>
+  <rect x="300" y="162" width="180" height="45" rx="7" class="note"/><text x="390" y="181" text-anchor="middle" class="n">Rate limit and required</text><text x="390" y="197" text-anchor="middle" class="n">field validation</text>
+  <line x1="390" y1="238" x2="675" y2="238" class="msg"/><text x="532" y="228" text-anchor="middle" class="n">authoritative getDevice(id)</text>
+  <line x1="675" y1="270" x2="390" y2="270" class="return"/><text x="532" y="260" text-anchor="middle" class="n">public key + ACTIVE / REVOKED</text>
+  <rect x="300" y="298" width="180" height="64" rx="7" class="note"/><text x="390" y="318" text-anchor="middle" class="n">Check known device, fresh</text><text x="390" y="335" text-anchor="middle" class="n">timestamp, and ECDSA P-256</text><text x="390" y="352" text-anchor="middle" class="n">signature</text>
+  <line x1="390" y1="398" x2="990" y2="398" class="msg"/><text x="690" y="388" text-anchor="middle" class="n">claim authenticated request ID once for replay protection and audit</text>
+  <line x1="990" y1="430" x2="390" y2="430" class="return"/><text x="690" y="420" text-anchor="middle" class="n">claimed / duplicate / unavailable</text>
+  <rect x="294" y="458" width="192" height="50" rx="7" class="deny"/><text x="390" y="479" text-anchor="middle" class="n">Duplicate → 401</text><text x="390" y="496" text-anchor="middle" class="n">Store unavailable → 503</text>
+  <rect x="290" y="536" width="200" height="48" rx="7" class="note"/><text x="390" y="556" text-anchor="middle" class="n">Audit-first policy: GRANTED</text><text x="390" y="573" text-anchor="middle" class="n">or REVOKED; cache decision</text>
+  <rect x="294" y="612" width="192" height="45" rx="7" class="deny"/><text x="390" y="640" text-anchor="middle" class="n">REVOKED → 403</text>
+  <line x1="390" y1="690" x2="120" y2="690" class="return"/><text x="255" y="680" text-anchor="middle" class="n">ACTIVE → 200 Access granted and logged</text>
+  <rect x="300" y="724" width="180" height="38" rx="7" class="ok"/><text x="390" y="748" text-anchor="middle" class="n">Fail closed on dependency errors</text>
+</svg>

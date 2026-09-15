@@ -1,0 +1,31 @@
+{
+  "baseUrl": "http://localhost:3000",
+  "backend": "FABRIC",
+  "concurrency": 8,
+  "durationSeconds": 60,
+  "warmupSeconds": 10,
+  "lifecycleIterations": 20,
+  "requestTimeoutMs": 30000,
+  "resourceIntervalMs": 1000,
+  "gatewayPid": 12345,
+  "containers": ["peer0.org1.example.com", "orderer.example.com", "postgres"],
+  "network": {
+    "topology": "REPLACE_WITH_ACTUAL_TOPOLOGY",
+    "clientToGatewayRttMs": null,
+    "gatewayToBackendRttMs": null,
+    "bandwidthMbps": null,
+    "transport": "REPLACE_WITH_ETHERNET_WIFI_OR_VIRTUAL"
+  },
+  "machineNotes": "REPLACE_WITH_VM_CONTAINER_AND_POWER_MODE_DETAILS",
+  "output": "results/raw/fabric-run-01.jsonl",
+  "outage": {
+    "target": "fabric-peer",
+    "stopCommand": "docker stop peer0.org1.example.com",
+    "startCommand": "docker start peer0.org1.example.com",
+    "baselineSamples": 10,
+    "probeIntervalMs": 500,
+    "outageSeconds": 15,
+    "recoveryTimeoutSeconds": 90,
+    "commandTimeoutMs": 60000
+  }
+}

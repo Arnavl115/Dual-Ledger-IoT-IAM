@@ -11,6 +11,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.CORS_ORIGIN || '*';
 
+function positiveIntegerSetting(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const ACCESS_RATE_LIMIT_WINDOW_MS = positiveIntegerSetting(process.env.ACCESS_RATE_LIMIT_WINDOW_MS, 60 * 1000);
+const ACCESS_RATE_LIMIT_MAX = positiveIntegerSetting(process.env.ACCESS_RATE_LIMIT_MAX, 120);
+
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: false }));
 
@@ -52,7 +60,7 @@ app.use((req, res, next) => {
 
 // ------------------------------------------------------------------
 // Rate limiting — simple in-memory sliding window (production: use Redis)
-// Limits /api/access to 120 req/min per IP to mitigate flooding
+// Defaults to 120 req/min per IP. Controlled benchmarks can override this.
 // ------------------------------------------------------------------
 const rateBuckets = new Map();
 function rateLimit({ windowMs, max, message }) {
@@ -300,21 +308,37 @@ const deviceStore = {
 
         const { publicKey, privateKey } = simulatorKeys.generateKeyPair();
         const completed = [];
+        const timings = {};
+        const registrationStarted = process.hrtime.bigint();
+        const measure = async (stage, operation) => {
+            const started = process.hrtime.bigint();
+            try {
+                return await operation();
+            } finally {
+                timings[stage] = Number(process.hrtime.bigint() - started) / 1e6;
+            }
+        };
+        const publishTimings = () => {
+            timings.T_total = Number(process.hrtime.bigint() - registrationStarted) / 1e6;
+            if (context) context.registrationTimingMs = { ...timings };
+        };
         try {
-            const registeredFabricDevice = await fabric.registerDevice(id, publicKey);
+            const registeredFabricDevice = await measure('T_F', () => fabric.registerDevice(id, publicKey));
             completed.push('FABRIC');
-            await iota.registerDevice(id, publicKey);
+            await measure('T_I', () => iota.registerDevice(id, publicKey));
             completed.push('IOTA');
             if (dbMode === 'POSTGRES') {
-                await db.upsertDevice(id, publicKey, 'ACTIVE');
+                await measure('T_P', () => db.upsertDevice(id, publicKey, 'ACTIVE'));
                 completed.push('POSTGRES');
             }
-            simulatorKeys.add(id, privateKey);
+            await measure('T_K', () => simulatorKeys.add(id, privateKey));
             completed.push('SIMULATOR');
+            publishTimings();
             ledgerError = null;
             markBackend(context, 'FABRIC+IOTA');
             return registeredFabricDevice;
         } catch (error) {
+            publishTimings();
             const rollbackErrors = [];
             if (completed.includes('SIMULATOR')) {
                 try { simulatorKeys.remove(id); } catch (rollbackError) { rollbackErrors.push(`simulator: ${rollbackError.message}`); }
@@ -330,7 +354,9 @@ const deviceStore = {
             }
             ledgerError = error.message;
             const suffix = rollbackErrors.length ? `; rollback failed for ${rollbackErrors.join(', ')}` : '';
-            throw new Error(`${error.message}${suffix}`);
+            const registrationError = new Error(`${error.message}${suffix}`);
+            registrationError.registrationTimingMs = context?.registrationTimingMs;
+            throw registrationError;
         }
     },
 
@@ -993,10 +1019,11 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
             ? deviceStore.registerSimulatorDevice(formattedId, backendContext)
             : deviceStore.register(formattedId, null, publicKey, backendContext));
     } catch (err) {
+        const timing = err.registrationTimingMs ? { registrationTimingMs: err.registrationTimingMs } : {};
         if (err.code === '23505' || String(err.message).includes('already exists')) {
-            return res.status(409).json({ error: `Registration failed: ${err.message}` });
+            return res.status(409).json({ error: `Registration failed: ${err.message}`, ...timing });
         }
-        return res.status(err.status || 500).json({ error: `Registration failed: ${err.message}` });
+        return res.status(err.status || 500).json({ error: `Registration failed: ${err.message}`, ...timing });
     }
     const registeredPublicKey = registeredDevice?.publicKey || publicKey;
     const existing = devices.find(d => d.id === formattedId);
@@ -1020,7 +1047,10 @@ app.post('/api/devices/register', requireAuth, async (req, res) => {
         return auditUnavailable(res, err, { registrationCommitted: true });
     }
     const deviceList = await deviceStore.getAll();
-    return res.status(200).json({ devices: deviceList });
+    return res.status(200).json({
+        devices: deviceList,
+        ...(backendContext.registrationTimingMs ? { registrationTimingMs: backendContext.registrationTimingMs } : {}),
+    });
 });
 
 // Production: explicit revoke / activate / updateKey / delete — all actively use ledger transactions
@@ -1095,8 +1125,10 @@ app.post('/api/stress', requireAuth, (req, res) => {
 });
 
 // Gateway Edge Request Handler — rate limited, timestamp & replay protected
-app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, max: 120, message: 'Rate limit exceeded: max 120 access requests per minute' }), async (req, res) => {
+app.post('/api/access', measureStressRequest, rateLimit({ windowMs: ACCESS_RATE_LIMIT_WINDOW_MS, max: ACCESS_RATE_LIMIT_MAX, message: `Rate limit exceeded: max ${ACCESS_RATE_LIMIT_MAX} access requests per window` }), async (req, res) => {
     const payload = req.body;
+    const accessStarted = process.hrtime.bigint();
+    const accessTimingMs = {};
     processedCount++;
     requestCount++;
 
@@ -1123,6 +1155,7 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
 
     let device;
     const backendContext = {};
+    const lookupStarted = process.hrtime.bigint();
     try {
         device = await deviceStore.get(payload.device_id, true, backendContext);
         res.locals.backend = backendContext.backend;
@@ -1134,6 +1167,8 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
             message: 'Access unavailable: authoritative ledger could not be reached',
             isStressTesting,
         });
+    } finally {
+        accessTimingMs.ledgerLookup = Number(process.hrtime.bigint() - lookupStarted) / 1e6;
     }
 
     if (!device) {
@@ -1205,6 +1240,7 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
         hash: `${payload.signature.substring(0, 6)}...${payload.signature.substring(payload.signature.length - 3)}`
     };
     let claimed;
+    const persistenceStarted = process.hrtime.bigint();
     try {
         claimed = await claimAuthenticatedRequest(logEntry);
     } catch (err) {
@@ -1214,6 +1250,8 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
             message: 'Access unavailable: replay protection could not be verified',
             isStressTesting,
         });
+    } finally {
+        accessTimingMs.replayAuditPersistence = Number(process.hrtime.bigint() - persistenceStarted) / 1e6;
     }
     if (!claimed) {
         console.log(`   ❌ [SECURITY ALERT] Authenticated request replay rejected!`);
@@ -1239,7 +1277,11 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
         return res.status(403).json({
             status: "error",
             message: "Forbidden: Device registration is revoked",
-            isStressTesting
+            isStressTesting,
+            accessTimingMs: {
+                ...accessTimingMs,
+                gatewayTotal: Number(process.hrtime.bigint() - accessStarted) / 1e6,
+            },
         });
     }
 
@@ -1249,7 +1291,11 @@ app.post('/api/access', measureStressRequest, rateLimit({ windowMs: 60 * 1000, m
         status: "success",
         message: "Access granted and logged",
         routed_to: res.locals.backend,
-        isStressTesting
+        isStressTesting,
+        accessTimingMs: {
+            ...accessTimingMs,
+            gatewayTotal: Number(process.hrtime.bigint() - accessStarted) / 1e6,
+        },
     });
 });
 
